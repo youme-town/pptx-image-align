@@ -8,14 +8,15 @@ Features:
 - Interactive REAL-TIME PREVIEW of the slide layout.
 - Layout Mode (Grid vs Flow).
 - **NEW**: Flow Alignment (Left/Center/Right) fully implemented for both Preview and PPTX.
-- **UPDATED**: Flow Vertical Alignment (Top/Center/Bottom) works correctly by calculating item bounding boxes.
+- **UPDATED**: Flow Vertical Alignment (Top/Center/Bottom) aligns the entire block of rows relative to the slide.
 - Fixed image size specification.
 - **RESTORED**: Crop row/column filters and detailed crop size settings.
 - **NEW**: Precise Gap Control (cm or scale) for Grid H/V, Main-Crop, Crop-Crop, and **Crop-Bottom**.
 - **NEW**: Image Aspect Ratio & Fit Mode control (Fit/Width/Height).
 - **NEW**: Per-Crop Alignment & Position Control.
 - **FIXED**: V-Align behavior in Flow mode now correctly handles complex crop arrangements.
-- **FIXED**: NameError 'calculate_item_dimensions' resolved; bounds calculation logic unified.
+- **FIXED**: Preview crash in Flow mode.
+- **FIXED**: Bounds calculation unified for Preview and PPTX to ensure WYSIWYG.
 - Save/Load configuration to/from YAML files.
 """
 
@@ -587,19 +588,28 @@ def calculate_grid_metrics(config: GridConfig) -> LayoutMetrics:
 
 # --- Helper: Calculate Item Bounds ---
 def calculate_item_bounds(
-    config, metrics, image_path, row_idx, col_idx, border_offset_cm=0.0
+    config,
+    metrics,
+    image_path,
+    row_idx,
+    col_idx,
+    border_offset_cm=0.0,
+    override_size=None,
 ):
     """
     Returns (min_x, min_y, max_x, max_y) bounding box relative to Main Image Top-Left (0,0).
     """
     has_crops = should_apply_crop(row_idx, col_idx, config)
 
-    if image_path == "DUMMY":
+    if override_size:
+        orig_w, orig_h = override_size
+    elif image_path == "dummy":
+        # Fallback if no override size is passed for dummy, use default fit
         return 0, 0, 0, 0
-
-    orig_w, orig_h = calculate_image_size_fit(
-        image_path, metrics.main_width, metrics.main_height, config.fit_mode
-    )
+    else:
+        orig_w, orig_h = calculate_image_size_fit(
+            image_path, metrics.main_width, metrics.main_height, config.fit_mode
+        )
 
     min_x, min_y = 0.0, 0.0
     max_x, max_y = orig_w, orig_h
@@ -629,19 +639,41 @@ def calculate_item_bounds(
             for crop_idx, region in enumerate(config.crop_regions):
                 # Calculate Crop Size
                 cw, ch = 0, 0
-                if disp.size is not None:
-                    cw, ch = calculate_image_size_fit(
-                        image_path, disp.size, 9999, "width"
-                    )
-                elif disp.scale is not None:
-                    tw = orig_w * disp.scale
-                    cw, ch = calculate_image_size_fit(image_path, tw, 9999, "width")
+
+                # Check for DUMMY context to decide if we use path or dummy assumption
+                if override_size:
+                    # Dummy dimensions
+                    if disp.size is not None:
+                        cw, ch = calculate_size_fit_static(
+                            100, 100, disp.size, 9999, "width"
+                        )
+                    elif disp.scale is not None:
+                        tw = orig_w * disp.scale
+                        cw, ch = calculate_size_fit_static(100, 100, tw, 9999, "width")
+                    else:
+                        single_h = (
+                            orig_h - actual_gap_cc * (num_crops - 1)
+                        ) / num_crops
+                        cw, ch = calculate_size_fit_static(
+                            100, 100, metrics.crop_size, single_h, "fit"
+                        )
                 else:
-                    # Fit
-                    single_h = (orig_h - actual_gap_cc * (num_crops - 1)) / num_crops
-                    cw, ch = calculate_image_size_fit(
-                        image_path, metrics.crop_size, single_h, "fit"
-                    )
+                    # Real image path logic
+                    if disp.size is not None:
+                        cw, ch = calculate_image_size_fit(
+                            image_path, disp.size, 9999, "width"
+                        )
+                    elif disp.scale is not None:
+                        tw = orig_w * disp.scale
+                        cw, ch = calculate_image_size_fit(image_path, tw, 9999, "width")
+                    else:
+                        # Fit
+                        single_h = (
+                            orig_h - actual_gap_cc * (num_crops - 1)
+                        ) / num_crops
+                        cw, ch = calculate_image_size_fit(
+                            image_path, metrics.crop_size, single_h, "fit"
+                        )
 
                 # Position logic
                 this_gap_mc = region.gap if region.gap is not None else actual_gap_mc
@@ -670,6 +702,10 @@ def calculate_item_bounds(
                         elif num_crops > 1 and crop_idx == num_crops - 1:
                             c_top = orig_h - ch
                         else:
+                            # Recalc single_h if needed or use approx
+                            single_h = (
+                                orig_h - actual_gap_cc * (num_crops - 1)
+                            ) / num_crops
                             slot_top = crop_idx * (single_h + actual_gap_cc)
                             c_top = slot_top + (single_h - ch) / 2
 
@@ -689,18 +725,34 @@ def calculate_item_bounds(
 
             for crop_idx, region in enumerate(config.crop_regions):
                 cw, ch = 0, 0
-                if disp.size is not None:
-                    cw, ch = calculate_image_size_fit(
-                        image_path, 9999, disp.size, "height"
-                    )
-                elif disp.scale is not None:
-                    th = orig_h * disp.scale
-                    cw, ch = calculate_image_size_fit(image_path, 9999, th, "height")
+                if override_size:
+                    if disp.size is not None:
+                        cw, ch = calculate_size_fit_static(
+                            100, 100, 9999, disp.size, "height"
+                        )
+                    elif disp.scale is not None:
+                        th = orig_h * disp.scale
+                        cw, ch = calculate_size_fit_static(100, 100, 9999, th, "height")
+                    else:
+                        sw = (orig_w - actual_gap_cc * (num_crops - 1)) / num_crops
+                        cw, ch = calculate_size_fit_static(
+                            100, 100, sw, metrics.crop_size, "fit"
+                        )
                 else:
-                    sw = (orig_w - actual_gap_cc * (num_crops - 1)) / num_crops
-                    cw, ch = calculate_image_size_fit(
-                        image_path, sw, metrics.crop_size, "fit"
-                    )
+                    if disp.size is not None:
+                        cw, ch = calculate_image_size_fit(
+                            image_path, 9999, disp.size, "height"
+                        )
+                    elif disp.scale is not None:
+                        th = orig_h * disp.scale
+                        cw, ch = calculate_image_size_fit(
+                            image_path, 9999, th, "height"
+                        )
+                    else:
+                        sw = (orig_w - actual_gap_cc * (num_crops - 1)) / num_crops
+                        cw, ch = calculate_image_size_fit(
+                            image_path, sw, metrics.crop_size, "fit"
+                        )
 
                 this_gap_mc = region.gap if region.gap is not None else actual_gap_mc
                 if region.gap is not None and config.show_zoom_border:
@@ -725,6 +777,7 @@ def calculate_item_bounds(
                         elif num_crops > 1 and crop_idx == num_crops - 1:
                             c_left = orig_w - cw
                         else:
+                            sw = (orig_w - actual_gap_cc * (num_crops - 1)) / num_crops
                             slot_left = crop_idx * (sw + actual_gap_cc)
                             c_left = slot_left + (sw - cw) / 2
 
@@ -741,6 +794,60 @@ def calculate_item_bounds(
             max_y += actual_gap_cb
 
     return min_x, min_y, max_x, max_y
+
+
+def calculate_flow_row_heights(config, metrics, image_grid, border_offset_cm):
+    """
+    Simulates flow layout to calculate the max content height for each row.
+    Used for vertical alignment of rows on the slide.
+    """
+    row_heights = []
+
+    for row_idx, row_images in enumerate(image_grid):
+        if row_idx >= config.rows:
+            break
+
+        row_max_h = 0.0
+
+        for col_idx, image_path in enumerate(row_images):
+            if col_idx >= config.cols:
+                break
+            if image_path is None:
+                continue
+
+            # Get TRUE bounding box height of the item
+            _, _, _, max_y = calculate_item_bounds(
+                config, metrics, image_path, row_idx, col_idx, border_offset_cm
+            )
+            # Bounds are relative to main image top-left (0,0). So height is max_y - min_y,
+            # BUT we assume main image is aligned to row top?
+            # Actually flow layout aligns items within a row based on their height.
+            # Usually row height = max(item_height).
+            # calculate_item_bounds returns min_y which might be negative if crop is above main.
+            # Height contribution is max_y - min_y.
+
+            # We need to know if min_y is negative.
+            # If min_y < 0, it means crop extends ABOVE the main image.
+            # The "row top" must accommodate this.
+
+            # Let's assume calculate_item_bounds is correct size.
+            # Item height = max_y - min_y.
+
+            # Re-calling it to get min_y as well
+            min_x, min_y, max_x, max_y = calculate_item_bounds(
+                config, metrics, image_path, row_idx, col_idx, border_offset_cm
+            )
+            item_h = max_y - min_y
+            if item_h > row_max_h:
+                row_max_h = item_h
+
+        # If no items, use metric default
+        if row_max_h == 0.0:
+            row_max_h = metrics.main_height
+
+        row_heights.append(row_max_h)
+
+    return row_heights
 
 
 def create_grid_presentation(config: GridConfig) -> str:
@@ -769,24 +876,72 @@ def create_grid_presentation(config: GridConfig) -> str:
     if config.show_zoom_border:
         border_offset_cm = pt_to_cm(config.crop_border_width)
 
+    # 1. Calculate actual row heights for Flow Mode (Vertical Packing)
+    flow_row_heights = []
+    if config.layout_mode == "flow":
+        flow_row_heights = calculate_flow_row_heights(
+            config, metrics, image_grid, border_offset_cm
+        )
+
+    # 2. Calculate Total Slide Content Height for Flow Vertical Align (Slide-level)
+    total_content_height = 0.0
+    if config.layout_mode == "flow":
+        for i, rh in enumerate(flow_row_heights):
+            total_content_height += rh
+            if i < len(flow_row_heights) - 1:
+                # Add gap between rows
+                # Gap is gap_v.
+                # config.gap_v can be scale-based.
+                # We need a reference. Use main_height from metrics as base reference?
+                # Or use current row height?
+                # Let's use metric main_height for scale reference to be consistent with Grid
+                gap_val = config.gap_v.to_cm(metrics.main_height)
+                total_content_height += gap_val
+    else:
+        # Grid mode height is fixed by definition
+        # But wait, user wants V-Align for grid? Usually Grid fills space or starts from margin_top.
+        # Current logic: Starts at margin_top.
+        pass
+
     try:
+        # Determine Start Y based on Flow V-Align
         current_y = config.margin_top
+        if config.layout_mode == "flow":
+            avail_h = config.slide_height - config.margin_top - config.margin_bottom
+            if config.flow_vertical_align == "center":
+                current_y = config.margin_top + (avail_h - total_content_height) / 2
+            elif config.flow_vertical_align == "bottom":
+                current_y = config.margin_top + (
+                    avail_h - total_content_height
+                )  # Align to bottom margin? Or slide bottom?
+                # If we align to slide bottom margin: margin_top + avail_h is bottom margin line.
+                # So start = (margin_top + avail_h) - total_h
+                current_y = (config.margin_top + avail_h) - total_content_height
+            else:  # top
+                current_y = config.margin_top
 
         for row_idx, row_images in enumerate(image_grid):
             if row_idx >= config.rows:
                 break
 
+            # Determine Row Height for this row
+            if config.layout_mode == "flow":
+                if row_idx < len(flow_row_heights):
+                    current_row_height = flow_row_heights[row_idx]
+                else:
+                    current_row_height = metrics.main_height
+            else:
+                current_row_height = (
+                    metrics.row_heights[row_idx]
+                    if row_idx < len(metrics.row_heights)
+                    else metrics.main_height
+                )
+
             this_gap_v = config.gap_v.to_cm(metrics.main_height)
             current_x = config.margin_left
-            current_row_h = (
-                metrics.row_heights[row_idx]
-                if row_idx < len(metrics.row_heights)
-                else metrics.main_height
-            )
 
-            # --- Pre-calculate row properties (Total Width & Max Height) for Flow Mode ---
+            # --- Pre-calculate row total width for alignment if in flow mode ---
             row_total_content_width = 0.0
-            row_max_content_height = 0.0
             valid_items = 0
 
             if config.layout_mode == "flow":
@@ -796,25 +951,18 @@ def create_grid_presentation(config: GridConfig) -> str:
                     if image_path is None:
                         continue
 
-                    # Use helper to get TRUE bounding box of the item (main + crops)
                     min_x, min_y, max_x, max_y = calculate_item_bounds(
                         config, metrics, image_path, row_idx, col_idx, border_offset_cm
                     )
                     item_w = max_x - min_x
-                    item_h = max_y - min_y
+                    # item_h = max_y - min_y # Already used for row height
 
                     row_total_content_width += item_w
-                    if item_h > row_max_content_height:
-                        row_max_content_height = item_h
                     valid_items += 1
 
                 if valid_items > 1:
                     g_val = config.gap_h.to_cm(metrics.main_width)
                     row_total_content_width += (valid_items - 1) * g_val
-
-                if row_max_content_height > 0:
-                    # Update row height for this flow row to be tightly packed
-                    current_row_h = row_max_content_height
 
                 avail_w = config.slide_width - config.margin_left - config.margin_right
                 if config.flow_align == "center":
@@ -825,11 +973,7 @@ def create_grid_presentation(config: GridConfig) -> str:
                     current_x = config.margin_left + (avail_w - row_total_content_width)
                 else:
                     current_x = config.margin_left
-
             # --- End Pre-calculation ---
-
-            # Initialize with safe value
-            actual_row_max_y = current_y + current_row_h
 
             for col_idx, image_path in enumerate(row_images):
                 if col_idx >= config.cols:
@@ -847,44 +991,60 @@ def create_grid_presentation(config: GridConfig) -> str:
                         current_x += w + this_gap_h
                     continue
 
-                # Get Bounds for this item
+                has_crops = should_apply_crop(row_idx, col_idx, config)
+                orig_w, orig_h = calculate_image_size_fit(
+                    image_path, metrics.main_width, metrics.main_height, config.fit_mode
+                )
+
+                # Global dynamic gaps
+                global_gap_mc = config.crop_display.main_crop_gap.to_cm(
+                    orig_w if config.crop_display.position == "right" else orig_h
+                )
+                global_gap_cc = config.crop_display.crop_crop_gap.to_cm(
+                    orig_w if config.crop_display.position == "right" else orig_h
+                )
+                global_gap_cb = config.crop_display.crop_bottom_gap.to_cm(
+                    orig_w if config.crop_display.position == "right" else orig_h
+                )
+
+                # Compensate for border
+                if config.show_zoom_border:
+                    global_gap_mc += border_offset_cm
+                    global_gap_cc += border_offset_cm
+
+                # Determine Main Image Position using Bounding Box Offset
                 min_x, min_y, max_x, max_y = calculate_item_bounds(
                     config, metrics, image_path, row_idx, col_idx, border_offset_cm
                 )
                 item_w = max_x - min_x
                 item_h = max_y - min_y
 
-                # Determine Item Top-Left based on V-Align
                 if config.layout_mode == "flow":
-                    item_left = current_x
+                    # Item left is current_x
+                    item_draw_left = current_x
 
-                    if config.flow_vertical_align == "top":
-                        item_top = current_y
-                    elif config.flow_vertical_align == "bottom":
-                        # Align bottom of item to bottom of row
-                        item_top = current_y + (current_row_h - item_h)
-                    else:  # center
-                        item_top = current_y + (current_row_h - item_h) / 2
+                    # Align Item Vertically WITHIN Row
+                    # Row height is current_row_height.
+                    # We center the item in the row line.
+                    item_draw_top = current_y + (current_row_height - item_h) / 2
                 else:
-                    # Grid Mode: Centers in cell
                     cell_w = (
                         metrics.col_widths[col_idx]
                         if col_idx < len(metrics.col_widths)
                         else metrics.main_width
                     )
-                    item_left = current_x + (cell_w - item_w) / 2
-                    item_top = (
-                        current_y + (metrics.main_height - item_h) / 2
-                    )  # Approx grid height centering
+                    # Center in grid cell
+                    item_draw_left = current_x + (cell_w - item_w) / 2
+                    # Grid Row Height is in metrics or calculated.
+                    # If we used metrics.row_heights, it might be smaller/larger than item.
+                    # For grid, usually we center in the allocated slot.
+                    # current_row_height from metrics is used.
+                    item_draw_top = current_y + (current_row_height - item_h) / 2
 
-                # Apply relative coords (min_x, min_y offset) to find Main Image Position
-                final_main_left = item_left - min_x
-                final_main_top = item_top - min_y
-
-                # Calculate actual image size again for drawing
-                orig_w, orig_h = calculate_image_size_fit(
-                    image_path, metrics.main_width, metrics.main_height, config.fit_mode
-                )
+                # Calculate absolute position for Main Image
+                # Main Image is at (0-min_x, 0-min_y) relative to Item Top-Left
+                final_main_left = item_draw_left - min_x
+                final_main_top = item_draw_top - min_y
 
                 pic = slide.shapes.add_picture(
                     image_path,
@@ -894,8 +1054,6 @@ def create_grid_presentation(config: GridConfig) -> str:
                     cm_to_emu(orig_h),
                 )
                 pic.shadow.inherit = False
-
-                has_crops = should_apply_crop(row_idx, col_idx, config)
 
                 if has_crops and config.show_crop_border:
                     add_crop_borders_to_image(
@@ -909,21 +1067,8 @@ def create_grid_presentation(config: GridConfig) -> str:
                         config.crop_border_width,
                     )
 
-                content_bottom_edge = item_top + item_h
-
                 if has_crops and num_crops > 0:
                     disp = config.crop_display
-                    actual_gap_mc = disp.main_crop_gap.to_cm(
-                        orig_w if disp.position == "right" else orig_h
-                    )
-                    actual_gap_cc = disp.crop_crop_gap.to_cm(
-                        orig_w if disp.position == "right" else orig_h
-                    )
-
-                    # Compensate for border
-                    if config.show_zoom_border:
-                        actual_gap_mc += border_offset_cm
-                        actual_gap_cc += border_offset_cm
 
                     for crop_idx, region in enumerate(config.crop_regions):
                         crop_filename = f"crop_{row_idx}_{col_idx}_{crop_idx}.png"
@@ -958,14 +1103,14 @@ def create_grid_presentation(config: GridConfig) -> str:
                             # Fallback fit
                             if disp.position == "right":
                                 single_h = (
-                                    orig_h - actual_gap_cc * (num_crops - 1)
+                                    orig_h - global_gap_cc * (num_crops - 1)
                                 ) / num_crops
                                 cw, ch = calculate_image_size_fit(
                                     crop_path, metrics.crop_size, single_h, "fit"
                                 )
                             else:
                                 single_w = (
-                                    orig_w - actual_gap_cc * (num_crops - 1)
+                                    orig_w - global_gap_cc * (num_crops - 1)
                                 ) / num_crops
                                 cw, ch = calculate_image_size_fit(
                                     crop_path, single_w, metrics.crop_size, "fit"
@@ -973,7 +1118,7 @@ def create_grid_presentation(config: GridConfig) -> str:
 
                         # Resolve Gap
                         this_gap_mc = (
-                            region.gap if region.gap is not None else actual_gap_mc
+                            region.gap if region.gap is not None else global_gap_mc
                         )
                         if region.gap is not None and config.show_zoom_border:
                             this_gap_mc += border_offset_cm
@@ -991,20 +1136,22 @@ def create_grid_presentation(config: GridConfig) -> str:
                                 c_top = final_main_top + orig_h - ch + region.offset
                             else:  # auto
                                 if disp.scale is not None or disp.size is not None:
+                                    # Stack logic
                                     c_top = final_main_top + crop_idx * (
-                                        ch + actual_gap_cc
+                                        ch + global_gap_cc
                                     )
                                 else:
+                                    # Fit logic (Pin ends)
                                     if crop_idx == 0:
                                         c_top = final_main_top
                                     elif num_crops > 1 and crop_idx == num_crops - 1:
                                         c_top = (final_main_top + orig_h) - ch
                                     else:
                                         single_h = (
-                                            orig_h - actual_gap_cc * (num_crops - 1)
+                                            orig_h - global_gap_cc * (num_crops - 1)
                                         ) / num_crops
                                         slot_top = final_main_top + crop_idx * (
-                                            single_h + actual_gap_cc
+                                            single_h + global_gap_cc
                                         )
                                         c_top = slot_top + (single_h - ch) / 2
                         else:  # bottom
@@ -1020,7 +1167,7 @@ def create_grid_presentation(config: GridConfig) -> str:
                             else:  # auto
                                 if disp.scale is not None or disp.size is not None:
                                     c_left = final_main_left + crop_idx * (
-                                        cw + actual_gap_cc
+                                        cw + global_gap_cc
                                     )
                                 else:
                                     if crop_idx == 0:
@@ -1029,10 +1176,10 @@ def create_grid_presentation(config: GridConfig) -> str:
                                         c_left = (final_main_left + orig_w) - cw
                                     else:
                                         single_w = (
-                                            orig_w - actual_gap_cc * (num_crops - 1)
+                                            orig_w - global_gap_cc * (num_crops - 1)
                                         ) / num_crops
                                         slot_left = final_main_left + crop_idx * (
-                                            single_w + actual_gap_cc
+                                            single_w + global_gap_cc
                                         )
                                         c_left = slot_left + (single_w - cw) / 2
 
@@ -1057,9 +1204,6 @@ def create_grid_presentation(config: GridConfig) -> str:
                                 config.zoom_border_shape,
                             )
 
-                if content_bottom_edge > actual_row_max_y:
-                    actual_row_max_y = content_bottom_edge
-
                 if config.layout_mode == "flow":
                     current_x += item_w + this_gap_h
                 else:
@@ -1071,17 +1215,7 @@ def create_grid_presentation(config: GridConfig) -> str:
                     current_x += w + this_gap_h
 
             # Row Advance Logic
-            this_gap_v = config.gap_v.to_cm(
-                metrics.main_height
-            )  # Define before if/else
-            if config.layout_mode == "flow":
-                # Ensure we advance at least by max content height found
-                if actual_row_max_y > current_y:
-                    current_y = actual_row_max_y + this_gap_v
-                else:
-                    current_y += current_row_h + this_gap_v
-            else:
-                current_y += current_row_h + this_gap_v
+            current_y += current_row_height + this_gap_v
 
         prs.save(config.output)
     except Exception as e:
@@ -2077,31 +2211,18 @@ class ImageGridApp:
         if config.show_zoom_border:
             border_offset_cm = pt_to_cm(config.zoom_border_width)
 
-        for r in range(config.rows):
-            current_row_h = (
-                metrics.row_heights[r]
-                if r < len(metrics.row_heights)
-                else metrics.main_height
-            )
-            cx = config.margin_left
+        # Pre-calc total content height for Flow V-Align (Slide-Level)
+        total_content_height = 0.0
+        row_heights_flow = []
 
-            # --- Flow Mode Alignment Logic (Preview) ---
-            row_content_width = 0.0
-            valid_items = 0
-            if config.layout_mode == "flow":
-                # Pre-calc row width
-                sim_cx = 0
+        if config.layout_mode == "flow":
+            # Simulate row heights
+            sim_cy = config.margin_top
+            for r in range(config.rows):
+                sim_row_h = 0.0
+                sim_items = 0
                 for c in range(config.cols):
-                    # Use helper to get TRUE bounding box of the item (main + crops)
-                    item_w, item_h = calculate_item_bounds(
-                        config, metrics, "DUMMY", r, c, border_offset_cm
-                    )
-                    # For preview dummy, calculate_item_bounds returns 0s for dummy.
-                    # We need to simulate size using dummy aspect ratio.
-                    # Since calculate_item_bounds uses image path to determine size,
-                    # and here we only have dummy, let's inject dummy sizes manually or
-                    # simulate using calculate_size_fit_static.
-
+                    # Preview uses dummy size override
                     img_w_cm, img_h_cm = calculate_size_fit_static(
                         dummy_w_px,
                         dummy_h_px,
@@ -2110,93 +2231,91 @@ class ImageGridApp:
                         config.fit_mode,
                     )
 
-                    # Manual simulation of item_w for preview dummy
-                    # This logic duplicates calculate_item_bounds but uses dummy size
-                    # Ideally refactor, but for fix speed:
-                    item_width = img_w_cm
+                    # Call calculate_item_bounds with dummy override
+                    # Note: We need to pass dummy size because calculate_item_bounds
+                    # normally opens file.
+                    override_sz = (img_w_cm, img_h_cm)
+
+                    # Check if cell is active (mock logic: all cells active in preview)
+                    # In real logic, we check image path. In preview we check loop range.
                     has_crops = should_apply_crop(r, c, config)
 
-                    if has_crops and config.crop_regions:
-                        num_crops = len(config.crop_regions)
-                        disp = config.crop_display
-                        actual_gap_mc = disp.main_crop_gap.to_cm(
-                            img_w_cm if disp.position == "right" else img_h_cm
-                        )
-                        if config.show_zoom_border:
-                            actual_gap_mc += border_offset_cm
+                    # We need to simulate bounds calculation for height
+                    # ... reuse logic inside loop
+                    min_x, min_y, max_x, max_y = calculate_item_bounds(
+                        config,
+                        metrics,
+                        "dummy",
+                        r,
+                        c,
+                        border_offset_cm,
+                        override_size=override_sz,
+                    )
+                    item_h = max_y - min_y
+                    if item_h > sim_row_h:
+                        sim_row_h = item_h
+                    sim_items += 1
 
-                        if disp.position == "right":
-                            max_crop_ext_w = 0
-                            for ci, r_crop in enumerate(config.crop_regions):
-                                crop_w = 0
-                                if disp.size is not None:
-                                    if disp.position == "right":
-                                        crop_w, _ = calculate_size_fit_static(
-                                            100, 100, disp.size, 9999, "width"
-                                        )
-                                    else:
-                                        crop_w, _ = calculate_size_fit_static(
-                                            100, 100, 9999, disp.size, "height"
-                                        )
-                                elif disp.scale is not None:
-                                    if disp.position == "right":
-                                        tw = img_w_cm * disp.scale
-                                        crop_w, _ = calculate_size_fit_static(
-                                            100, 100, tw, 9999, "width"
-                                        )
-                                    else:
-                                        th = img_h_cm * disp.scale
-                                        crop_w, _ = calculate_size_fit_static(
-                                            100, 100, 9999, th, "height"
-                                        )
-                                else:
-                                    crop_w = metrics.crop_size
+                if sim_items > 0 and sim_row_h == 0:
+                    sim_row_h = metrics.main_height  # fallback
+                row_heights_flow.append(sim_row_h)
+                total_content_height += sim_row_h
 
-                                this_gap = (
-                                    r_crop.gap
-                                    if r_crop.gap is not None
-                                    else actual_gap_mc
-                                )
-                                current_ext = this_gap + crop_w
-                                if current_ext > max_crop_ext_w:
-                                    max_crop_ext_w = current_ext
-                            item_width += max_crop_ext_w
-                        else:
-                            # bottom
-                            # Check if crop stack is wider than main
-                            actual_gap_cc = disp.crop_crop_gap.to_cm(
-                                img_h_cm
-                            )  # bottom uses height ref approx
-                            if config.show_zoom_border:
-                                actual_gap_cc += border_offset_cm
+                # Add vertical gap if not last row
+                if r < config.rows - 1:
+                    this_gap_v = config.gap_v.to_cm(metrics.main_height)
+                    total_content_height += this_gap_v
 
-                            c_w_sum = 0
-                            for ci, r_crop in enumerate(config.crop_regions):
-                                c_w = 0
-                                if disp.size is not None:
-                                    c_w, _ = calculate_size_fit_static(
-                                        100, 100, 9999, disp.size, "height"
-                                    )
-                                elif disp.scale is not None:
-                                    th = img_h_cm * disp.scale
-                                    _, c_h = calculate_size_fit_static(
-                                        100, 100, 9999, th, "height"
-                                    )
-                                else:
-                                    sw = (
-                                        img_w_cm - actual_gap_cc * (num_crops - 1)
-                                    ) / num_crops
-                                    c_w, _ = calculate_size_fit_static(
-                                        100, 100, sw, metrics.crop_size, "fit"
-                                    )
-                                c_w_sum += c_w
+            # Adjust Start Y based on V-Align
+            avail_h = config.slide_height - config.margin_top - config.margin_bottom
+            if config.flow_vertical_align == "center":
+                cy = config.margin_top + (avail_h - total_content_height) / 2
+            elif config.flow_vertical_align == "bottom":
+                cy = (config.margin_top + avail_h) - total_content_height
+            else:
+                cy = config.margin_top
 
-                            if num_crops > 1:
-                                c_w_sum += actual_gap_cc * (num_crops - 1)
-                            if c_w_sum > item_width:
-                                item_width = c_w_sum
+        for r in range(config.rows):
+            # Determine row height for this row
+            if config.layout_mode == "flow":
+                current_row_h = (
+                    row_heights_flow[r]
+                    if r < len(row_heights_flow)
+                    else metrics.main_height
+                )
+            else:
+                current_row_h = (
+                    metrics.row_heights[r]
+                    if r < len(metrics.row_heights)
+                    else metrics.main_height
+                )
 
-                    row_content_width += item_width
+            cx = config.margin_left
+
+            # --- Flow Mode Horizontal Alignment Logic (Preview) ---
+            row_content_width = 0.0
+            valid_items = 0
+            if config.layout_mode == "flow":
+                for c in range(config.cols):
+                    img_w_cm, img_h_cm = calculate_size_fit_static(
+                        dummy_w_px,
+                        dummy_h_px,
+                        metrics.main_width,
+                        metrics.main_height,
+                        config.fit_mode,
+                    )
+                    # Check bounds
+                    min_x, min_y, max_x, max_y = calculate_item_bounds(
+                        config,
+                        metrics,
+                        "dummy",
+                        r,
+                        c,
+                        border_offset_cm,
+                        override_size=(img_w_cm, img_h_cm),
+                    )
+                    item_w = max_x - min_x
+                    row_content_width += item_w
                     valid_items += 1
 
                 if valid_items > 1:
@@ -2222,17 +2341,25 @@ class ImageGridApp:
                 )
                 this_gap_h = config.gap_h.to_cm(img_w_cm)
 
+                # Use helper to get TRUE bounding box of the item (main + crops)
+                # Pass dummy size override for preview
+                min_x, min_y, max_x, max_y = calculate_item_bounds(
+                    config,
+                    metrics,
+                    "dummy",
+                    r,
+                    c,
+                    border_offset_cm,
+                    override_size=(img_w_cm, img_h_cm),
+                )
+                item_w = max_x - min_x
+                item_h = max_y - min_y
+
                 if config.layout_mode == "flow":
                     main_l = cx
-                    # Vertical Align Preview logic (Simplified)
-                    # We don't have exact row max height here without another pass, so we use metrics.main_height as base or current_row_h
-                    base_h = current_row_h
-                    if config.flow_vertical_align == "top":
-                        main_t = cy
-                    elif config.flow_vertical_align == "bottom":
-                        main_t = cy + (base_h - img_h_cm)
-                    else:
-                        main_t = cy + (base_h - img_h_cm) / 2
+                    # Row-Item V-Align: Center in Row Line
+                    # Use current_row_h calculated in pre-pass
+                    main_t = cy + (current_row_h - item_h) / 2
                 else:
                     main_l = cx + (metrics.main_width - img_w_cm) / 2
                     main_t = cy + (metrics.main_height - img_h_cm) / 2
