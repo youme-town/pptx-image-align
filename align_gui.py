@@ -19,6 +19,8 @@ Features:
 - **FIXED**: Bounds calculation unified for Preview and PPTX to ensure WYSIWYG.
 - **FIXED**: Crop alignment now accounts for border width (aligns visual edge).
 - **FIXED**: Fixed AttributeError in config loading.
+- **FIXED**: Fixed NameError (single_slot_width) in preview.
+- **FIXED**: Fixed TclError in CropEditor.
 - Save/Load configuration to/from YAML files.
 """
 
@@ -2454,9 +2456,9 @@ class ImageGridApp:
                                     c_t = (main_t + img_h_cm) - c_h
                                 else:
                                     slot_top = main_t + crop_idx * (
-                                        single_slot_height + actual_gap_cc
+                                        single_h + actual_gap_cc
                                     )
-                                    c_t = slot_top + (single_slot_height - c_h) / 2
+                                    c_t = slot_top + (single_h - c_h) / 2
 
                             # Custom Alignment Override
                             this_gap_mc = (
@@ -2508,7 +2510,7 @@ class ImageGridApp:
                                 c_w, c_h = calculate_size_fit_static(
                                     dummy_cw,
                                     dummy_ch,
-                                    single_slot_width,
+                                    single_w,
                                     metrics.crop_size,
                                     "fit",
                                 )
@@ -2519,9 +2521,9 @@ class ImageGridApp:
                                     c_l = (main_l + img_w_cm) - c_w
                                 else:
                                     slot_left = main_l + crop_idx * (
-                                        single_slot_width + actual_gap_cc
+                                        single_w + actual_gap_cc
                                     )
-                                    c_l = slot_left + (single_slot_width - c_w) / 2
+                                    c_l = slot_left + (single_w - c_w) / 2
 
                             # Custom Alignment Override
                             this_gap_mc = (
