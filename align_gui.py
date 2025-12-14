@@ -17,6 +17,8 @@ Features:
 - **FIXED**: V-Align behavior in Flow mode now correctly handles complex crop arrangements.
 - **FIXED**: Preview crash in Flow mode.
 - **FIXED**: Bounds calculation unified for Preview and PPTX to ensure WYSIWYG.
+- **FIXED**: Crop alignment now accounts for border width (aligns visual edge).
+- **FIXED**: Fixed AttributeError in config loading.
 - Save/Load configuration to/from YAML files.
 """
 
@@ -614,6 +616,11 @@ def calculate_item_bounds(
     min_x, min_y = 0.0, 0.0
     max_x, max_y = orig_w, orig_h
 
+    # Half-border offset for alignment logic
+    # We want the "visual edge" (including border) to align with the main image edge.
+    # The border is drawn centered on the shape path. So it extends border_width/2 outward.
+    half_border = border_offset_cm / 2.0 if config.show_zoom_border else 0.0
+
     if has_crops and config.crop_regions:
         num_crops = len(config.crop_regions)
         disp = config.crop_display
@@ -686,11 +693,13 @@ def calculate_item_bounds(
                 # Y-Alignment logic (relative to main top 0)
                 c_top = 0.0
                 if region.align == "start":
-                    c_top = 0.0 + region.offset
+                    # Align outer visual edge to top
+                    c_top = 0.0 + region.offset + half_border
                 elif region.align == "center":
                     c_top = (orig_h - ch) / 2 + region.offset
                 elif region.align == "end":
-                    c_top = orig_h - ch + region.offset
+                    # Align outer visual edge to bottom
+                    c_top = orig_h - ch + region.offset - half_border
                 else:  # auto
                     if disp.scale is not None or disp.size is not None:
                         # Stack from top
@@ -763,11 +772,13 @@ def calculate_item_bounds(
                 # X-Alignment
                 c_left = 0.0
                 if region.align == "start":
-                    c_left = 0.0 + region.offset
+                    # Align outer visual edge to left
+                    c_left = 0.0 + region.offset + half_border
                 elif region.align == "center":
                     c_left = (orig_w - cw) / 2 + region.offset
                 elif region.align == "end":
-                    c_left = orig_w - cw + region.offset
+                    # Align outer visual edge to right
+                    c_left = orig_w - cw + region.offset - half_border
                 else:  # auto
                     if disp.scale is not None or disp.size is not None:
                         c_left = crop_idx * (cw + actual_gap_cc)
@@ -875,6 +886,9 @@ def create_grid_presentation(config: GridConfig) -> str:
     border_offset_cm = 0.0
     if config.show_zoom_border:
         border_offset_cm = pt_to_cm(config.crop_border_width)
+
+    # Calculate half-border for alignment logic
+    half_border = border_offset_cm / 2.0 if config.show_zoom_border else 0.0
 
     # 1. Calculate actual row heights for Flow Mode (Vertical Packing)
     flow_row_heights = []
@@ -1127,13 +1141,19 @@ def create_grid_presentation(config: GridConfig) -> str:
                         if disp.position == "right":
                             c_left = final_main_left + orig_w + this_gap_mc
                             if region.align == "start":
-                                c_top = final_main_top + region.offset
+                                c_top = final_main_top + region.offset + half_border
                             elif region.align == "center":
                                 c_top = (
                                     final_main_top + (orig_h - ch) / 2 + region.offset
                                 )
                             elif region.align == "end":
-                                c_top = final_main_top + orig_h - ch + region.offset
+                                c_top = (
+                                    final_main_top
+                                    + orig_h
+                                    - ch
+                                    + region.offset
+                                    - half_border
+                                )
                             else:  # auto
                                 if disp.scale is not None or disp.size is not None:
                                     # Stack logic
@@ -1157,13 +1177,19 @@ def create_grid_presentation(config: GridConfig) -> str:
                         else:  # bottom
                             c_top = final_main_top + orig_h + this_gap_mc
                             if region.align == "start":
-                                c_left = final_main_left + region.offset
+                                c_left = final_main_left + region.offset + half_border
                             elif region.align == "center":
                                 c_left = (
                                     final_main_left + (orig_w - cw) / 2 + region.offset
                                 )
                             elif region.align == "end":
-                                c_left = final_main_left + orig_w - cw + region.offset
+                                c_left = (
+                                    final_main_left
+                                    + orig_w
+                                    - cw
+                                    + region.offset
+                                    - half_border
+                                )
                             else:  # auto
                                 if disp.scale is not None or disp.size is not None:
                                     c_left = final_main_left + crop_idx * (
@@ -2211,6 +2237,9 @@ class ImageGridApp:
         if config.show_zoom_border:
             border_offset_cm = pt_to_cm(config.zoom_border_width)
 
+        # Half-border for alignment
+        half_border = border_offset_cm / 2.0 if config.show_zoom_border else 0.0
+
         # Pre-calc total content height for Flow V-Align (Slide-Level)
         total_content_height = 0.0
         row_heights_flow = []
@@ -2438,11 +2467,17 @@ class ImageGridApp:
 
                             c_l = main_l + img_w_cm + this_gap_mc
                             if region.align == "start":
-                                c_t = main_t + region.offset
+                                c_t = main_t + region.offset + half_border
                             elif region.align == "center":
                                 c_t = final_main_top + (orig_h - ch) / 2 + region.offset
                             elif region.align == "end":
-                                c_t = main_t + img_h_cm - c_h + region.offset
+                                c_t = (
+                                    main_t
+                                    + img_h_cm
+                                    - c_h
+                                    + region.offset
+                                    - half_border
+                                )
 
                             canvas.create_rectangle(
                                 tx(c_l),
@@ -2497,11 +2532,17 @@ class ImageGridApp:
 
                             c_t = main_t + img_h_cm + this_gap_mc
                             if region.align == "start":
-                                c_l = main_l + region.offset
+                                c_l = main_l + region.offset + half_border
                             elif region.align == "center":
                                 c_l = main_l + (img_w_cm - c_w) / 2 + region.offset
                             elif region.align == "end":
-                                c_l = main_l + img_w_cm - c_w + region.offset
+                                c_l = (
+                                    main_l
+                                    + img_w_cm
+                                    - c_w
+                                    + region.offset
+                                    - half_border
+                                )
 
                             canvas.create_rectangle(
                                 tx(c_l),
