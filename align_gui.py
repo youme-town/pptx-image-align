@@ -7,13 +7,19 @@ with images arranged in a grid layout.
 Features:
 - Interactive REAL-TIME PREVIEW of the slide layout.
 - Layout Mode (Grid vs Flow).
-- **NEW**: Flow Alignment (Left/Center/Right) fully implemented for both Preview and PPTX.
+- **NEW**: Visual Crop Editor.
+  - Open images directly from selected folders.
+  - Draw crop regions with mouse drag.
+  - Auto-detection of image aspect ratio on folder add.
+  - **UPDATED**: Crop Editor now always creates a NEW region instead of editing selected one.
+- Flow Alignment (Left/Center/Right).
 - Fixed image size specification.
-- **RESTORED**: Crop row/column filters and detailed crop size settings.
-- **NEW**: Precise Gap Control (cm or scale) for Grid H/V, Main-Crop, Crop-Crop, and **Crop-Bottom**.
-- **NEW**: Image Aspect Ratio & Fit Mode control (Fit/Width/Height).
-- **NEW**: Per-Crop Alignment & Position Control.
-- **FIXED**: Preview crash in Flow mode (UnboundLocalError).
+- Detailed crop settings (Alignment, Offset, Custom Gaps).
+- **UPDATED**: Full editing capability for Crop Regions (Name, X, Y, W, H, Color) in the list.
+- **UPDATED**: Separate controls for Crop Border (on source) and Zoom Border (on crop) thickness.
+- Border shape selection (Rectangle / Rounded) for Zoom Border.
+- **FIXED**: Layout calculation now accounts for border width to prevent overlap.
+- Precise Gap Control.
 - Save/Load configuration to/from YAML files.
 """
 
@@ -50,6 +56,12 @@ def cm_to_emu(cm: float) -> int:
 
 def pt_to_emu(pt: float) -> int:
     return int(pt * PT_TO_EMU)
+
+
+def pt_to_cm(pt: float) -> float:
+    """Convert points to centimeters."""
+    # 1 inch = 2.54 cm = 72 points
+    return pt * (2.54 / 72.0)
 
 
 @dataclass
@@ -118,10 +130,14 @@ class GridConfig:
     crop_rows: Optional[List[int]] = None
     crop_cols: Optional[List[int]] = None
     crop_display: CropDisplayConfig = field(default_factory=CropDisplayConfig)
+
+    # Border settings
     show_crop_border: bool = True
     crop_border_width: float = 1.5
     show_zoom_border: bool = True
     zoom_border_width: float = 1.5
+    zoom_border_shape: str = "rectangle"  # 'rectangle' or 'rounded'
+
     folders: List[str] = field(default_factory=list)
     output: str = "output.pptx"
 
@@ -265,6 +281,7 @@ def load_config(config_path: str) -> GridConfig:
             zb = border["zoom"]
             config.show_zoom_border = zb.get("show", config.show_zoom_border)
             config.zoom_border_width = zb.get("width", config.zoom_border_width)
+            config.zoom_border_shape = zb.get("shape", config.zoom_border_shape)
 
     if "folders" in data:
         config.folders = data["folders"]
@@ -363,9 +380,14 @@ def add_border_shape(
     height: float,
     border_color: tuple[int, int, int],
     border_width: float,
+    shape_type: str = "rectangle",
 ):
+    ms_shape_type = MSO_SHAPE.RECTANGLE
+    if shape_type == "rounded":
+        ms_shape_type = MSO_SHAPE.ROUNDED_RECTANGLE
+
     shape = slide.shapes.add_shape(
-        MSO_SHAPE.RECTANGLE,
+        ms_shape_type,
         cm_to_emu(left),
         cm_to_emu(top),
         cm_to_emu(width),
@@ -408,7 +430,8 @@ def add_crop_borders_to_image(
             border_h,
             region.color,
             border_width,
-        )
+            "rectangle",
+        )  # Original image crop marks are always rects
 
 
 @dataclass
@@ -463,6 +486,16 @@ def calculate_grid_metrics(config: GridConfig) -> LayoutMetrics:
         est_main_w if disp.position == "right" else est_main_h
     )
 
+    # Border offset compensation
+    # If zoom border is shown, we need extra space to avoid overlap because border is drawn on the line.
+    # Usually half width extends out. We add full width for safety/spacing on both sides relative to gap.
+    border_offset = 0.0
+    if config.show_zoom_border:
+        border_offset = pt_to_cm(config.zoom_border_width)
+        # Add a bit of space to gap_mc and gap_cc effectively
+        gap_mc += border_offset
+        gap_cc += border_offset
+
     main_w = 0.0
     main_h = 0.0
     crop_box_size = 0.0
@@ -506,6 +539,7 @@ def calculate_grid_metrics(config: GridConfig) -> LayoutMetrics:
             else:
                 crop_k = 0.33
 
+            # Note: gap_mc includes border offset now
             denom = config.cols + num_exp_cols * crop_k
             numer = avail_w_for_cells - num_exp_cols * (gap_mc + crop_c)
             main_w = numer / denom
@@ -576,6 +610,11 @@ def create_grid_presentation(config: GridConfig) -> str:
     num_crops = len(config.crop_regions)
     metrics = calculate_grid_metrics(config)
 
+    # Calculate Border Offset for placement
+    border_offset_cm = 0.0
+    if config.show_zoom_border:
+        border_offset_cm = pt_to_cm(config.zoom_border_width)
+
     try:
         current_y = config.margin_top
 
@@ -611,11 +650,15 @@ def create_grid_presentation(config: GridConfig) -> str:
                     )
 
                     item_width = orig_w
-                    if has_crops and num_crops > 0:
+                    if has_crops and config.crop_regions:
+                        num_crops = len(config.crop_regions)
                         disp = config.crop_display
                         actual_gap_mc = disp.main_crop_gap.to_cm(
                             orig_w if disp.position == "right" else orig_h
                         )
+                        if config.show_zoom_border:
+                            actual_gap_mc += border_offset_cm  # compensate gap
+
                         if disp.position == "right":
                             max_crop_ext = 0
                             for ci, r_crop in enumerate(config.crop_regions):
@@ -655,13 +698,13 @@ def create_grid_presentation(config: GridConfig) -> str:
                         else:
                             # bottom
                             # Check if crop stack is wider than main
-                            crop_stack_w = 0
                             actual_gap_cc = disp.crop_crop_gap.to_cm(
                                 orig_h
                             )  # bottom uses height ref approx
+                            if config.show_zoom_border:
+                                actual_gap_cc += border_offset_cm
 
                             # Estimate widths
-                            # Simple iteration
                             c_w_sum = 0
                             for ci, r_crop in enumerate(config.crop_regions):
                                 c_w = 0
@@ -683,7 +726,8 @@ def create_grid_presentation(config: GridConfig) -> str:
                                     )
                                 c_w_sum += c_w
 
-                            c_w_sum += actual_gap_cc * (num_crops - 1)
+                            if num_crops > 1:
+                                c_w_sum += actual_gap_cc * (num_crops - 1)
                             if c_w_sum > item_width:
                                 item_width = c_w_sum
 
@@ -691,8 +735,8 @@ def create_grid_presentation(config: GridConfig) -> str:
                     valid_items += 1
 
                 if valid_items > 1:
-                    g_val = config.gap_h.to_cm(metrics.main_width)
-                    row_total_content_width += (valid_items - 1) * g_val
+                    gap_val = config.gap_h.to_cm(metrics.main_width)  # approx
+                    row_content_width += (valid_items - 1) * gap_val
 
                 avail_w = config.slide_width - config.margin_left - config.margin_right
                 if config.flow_align == "center":
@@ -737,6 +781,11 @@ def create_grid_presentation(config: GridConfig) -> str:
                 global_gap_cb = config.crop_display.crop_bottom_gap.to_cm(
                     orig_w if config.crop_display.position == "right" else orig_h
                 )
+
+                # Compensate for border
+                if config.show_zoom_border:
+                    global_gap_mc += border_offset_cm
+                    global_gap_cc += border_offset_cm
 
                 if config.layout_mode == "flow":
                     final_main_left = current_x
@@ -822,6 +871,8 @@ def create_grid_presentation(config: GridConfig) -> str:
                         this_gap_mc = (
                             region.gap if region.gap is not None else global_gap_mc
                         )
+                        if region.gap is not None and config.show_zoom_border:
+                            this_gap_mc += border_offset_cm
 
                         # Resolve Alignment Position
                         if disp.position == "right":
@@ -912,6 +963,7 @@ def create_grid_presentation(config: GridConfig) -> str:
                                 ch,
                                 region.color,
                                 config.zoom_border_width,
+                                config.zoom_border_shape,
                             )
 
                 # Apply Crop-Bottom Gap to content extent if crops exist
@@ -940,6 +992,148 @@ def create_grid_presentation(config: GridConfig) -> str:
 
 
 # --- GUI Application ---
+
+
+class CropEditor(tk.Toplevel):
+    def __init__(self, parent, image_path, callback):
+        super().__init__(parent)
+        self.title("Crop Editor")
+        self.geometry("900x700")
+        self.callback = callback
+
+        self.image_path = image_path
+        self.orig_img = Image.open(image_path)
+        self.orig_w, self.orig_h = self.orig_img.size
+
+        # UI
+        self.canvas_frame = ttk.Frame(self)
+        self.canvas_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.canvas = tk.Canvas(self.canvas_frame, bg="gray")
+        self.canvas.pack(fill=tk.BOTH, expand=True)
+
+        self.bottom_frame = ttk.Frame(self, padding=5)
+        self.bottom_frame.pack(fill=tk.X)
+
+        ttk.Label(self.bottom_frame, text="Name:").pack(side=tk.LEFT)
+        self.var_name = tk.StringVar(value="Region")
+        ttk.Entry(self.bottom_frame, textvariable=self.var_name, width=10).pack(
+            side=tk.LEFT, padx=5
+        )
+
+        ttk.Button(self.bottom_frame, text="保存 (Save)", command=self.on_save).pack(
+            side=tk.RIGHT, padx=5
+        )
+        ttk.Button(self.bottom_frame, text="キャンセル", command=self.destroy).pack(
+            side=tk.RIGHT
+        )
+
+        # State
+        self.rect_id = None
+        self.start_x = None
+        self.start_y = None
+        self.cur_rect = None  # (x, y, w, h) in original coords
+
+        # Resize image to fit canvas
+        self.display_scale = 1.0
+        self.tk_img = None
+
+        self.bind("<Configure>", self.on_resize_window)
+        self.canvas.bind("<ButtonPress-1>", self.on_press)
+        self.canvas.bind("<B1-Motion>", self.on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self.on_release)
+
+        # Initial draw
+        self.after(100, self.redraw_image)
+
+    def on_resize_window(self, event):
+        if event.widget == self:
+            self.redraw_image()
+
+    def redraw_image(self):
+        c_w = self.canvas.winfo_width()
+        c_h = self.canvas.winfo_height()
+        if c_w < 50 or c_h < 50:
+            return
+
+        scale_w = c_w / self.orig_w
+        scale_h = c_h / self.orig_h
+        self.display_scale = min(scale_w, scale_h) * 0.9  # margin
+
+        new_w = int(self.orig_w * self.display_scale)
+        new_h = int(self.orig_h * self.display_scale)
+
+        resized = self.orig_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        self.tk_img = ImageTk.PhotoImage(resized)
+
+        self.canvas.delete("all")
+        # Center image
+        self.off_x = (c_w - new_w) // 2
+        self.off_y = (c_h - new_h) // 2
+
+        self.canvas.create_image(
+            self.off_x, self.off_y, anchor=tk.NW, image=self.tk_img
+        )
+
+        # Redraw existing rect if present
+        if self.cur_rect:
+            x, y, w, h = self.cur_rect
+            sx = x * self.display_scale + self.off_x
+            sy = y * self.display_scale + self.off_y
+            ex = (x + w) * self.display_scale + self.off_x
+            ey = (y + h) * self.display_scale + self.off_y
+            self.rect_id = self.canvas.create_rectangle(
+                sx, sy, ex, ey, outline="red", width=2
+            )
+
+    def on_press(self, event):
+        self.start_x = event.x
+        self.start_y = event.y
+        if self.rect_id:
+            self.canvas.delete(self.rect_id)
+        self.rect_id = self.canvas.create_rectangle(
+            self.start_x,
+            self.start_y,
+            self.start_x,
+            self.start_y,
+            outline="red",
+            width=2,
+        )
+
+    def on_drag(self, event):
+        self.canvas.coords(self.rect_id, self.start_x, self.start_y, event.x, event.y)
+
+    def on_release(self, event):
+        end_x, end_y = event.x, event.y
+
+        # Normalize to image coords
+        x1 = min(self.start_x, end_x) - self.off_x
+        y1 = min(self.start_y, end_y) - self.off_y
+        x2 = max(self.start_x, end_x) - self.off_x
+        y2 = max(self.start_y, end_y) - self.off_y
+
+        # Convert to original scale
+        ox1 = max(0, int(x1 / self.display_scale))
+        oy1 = max(0, int(y1 / self.display_scale))
+        ox2 = min(self.orig_w, int(x2 / self.display_scale))
+        oy2 = min(self.orig_h, int(y2 / self.display_scale))
+
+        w = ox2 - ox1
+        h = oy2 - oy1
+
+        if w > 0 and h > 0:
+            self.cur_rect = (ox1, oy1, w, h)
+
+    def on_save(self):
+        if self.cur_rect:
+            self.callback(
+                self.cur_rect[0],
+                self.cur_rect[1],
+                self.cur_rect[2],
+                self.cur_rect[3],
+                self.var_name.get(),
+            )
+        self.destroy()
 
 
 class ImageGridApp:
@@ -971,8 +1165,8 @@ class ImageGridApp:
         self.gap_mc_mode = tk.StringVar(value="cm")
         self.gap_cc_val = tk.DoubleVar(value=0.15)
         self.gap_cc_mode = tk.StringVar(value="cm")
-        self.gap_cb_val = tk.DoubleVar(value=0.0)  # New
-        self.gap_cb_mode = tk.StringVar(value="cm")  # New
+        self.gap_cb_val = tk.DoubleVar(value=0.0)
+        self.gap_cb_mode = tk.StringVar(value="cm")
 
         self.image_size_mode = tk.StringVar(value="fit")
         self.image_fit_mode = tk.StringVar(value="fit")
@@ -986,6 +1180,7 @@ class ImageGridApp:
 
         self.show_crop_border = tk.BooleanVar(value=True)
         self.crop_border_w = tk.DoubleVar(value=1.5)
+        self.zoom_border_shape = tk.StringVar(value="rectangle")  # New
         self.show_zoom_border = tk.BooleanVar(value=True)
         self.zoom_border_w = tk.DoubleVar(value=1.5)
 
@@ -1000,9 +1195,14 @@ class ImageGridApp:
         # Selected region editing vars
         self.sel_idx = None
         self.r_name = tk.StringVar()
+        self.r_x = tk.IntVar()
+        self.r_y = tk.IntVar()
+        self.r_w = tk.IntVar()
+        self.r_h = tk.IntVar()
+        self.r_color = (255, 0, 0)  # internal storage
         self.r_align = tk.StringVar(value="auto")
         self.r_offset = tk.DoubleVar(value=0.0)
-        self.r_gap = tk.StringVar(value="")  # Empty means None/Default
+        self.r_gap = tk.StringVar(value="")
 
         self.create_widgets()
         self.add_preview_tracers()
@@ -1100,6 +1300,20 @@ class ImageGridApp:
             self.crop_cols_filter,
             self.dummy_ratio_w,
             self.dummy_ratio_h,
+            # Add crop region edit variables to trigger preview update
+            self.r_name,
+            self.r_x,
+            self.r_y,
+            self.r_w,
+            self.r_h,
+            self.r_align,
+            self.r_offset,
+            self.r_gap,
+            self.zoom_border_shape,
+            self.show_zoom_border,
+            self.zoom_border_w,
+            self.show_crop_border,
+            self.crop_border_w,
         ]
         for v in vars_to_trace:
             v.trace_add("write", lambda *args: self.schedule_preview())
@@ -1244,11 +1458,14 @@ class ImageGridApp:
         f_reg.pack(fill=tk.X, pady=5)
         r_btn_frame = ttk.Frame(f_reg)
         r_btn_frame.pack(fill=tk.X)
-        ttk.Button(r_btn_frame, text="追加", command=self.add_region_dialog).pack(
-            side=tk.LEFT
-        )
+        ttk.Button(
+            r_btn_frame, text="画像から指定 (Editor)", command=self.open_crop_editor
+        ).pack(side=tk.LEFT, padx=2)
+        ttk.Button(
+            r_btn_frame, text="追加 (数値)", command=self.add_region_dialog
+        ).pack(side=tk.LEFT, padx=2)
         ttk.Button(r_btn_frame, text="削除", command=self.remove_region).pack(
-            side=tk.LEFT
+            side=tk.LEFT, padx=2
         )
         self.region_tree = ttk.Treeview(
             f_reg, columns=("name", "xywh", "align"), show="headings", height=4
@@ -1265,21 +1482,48 @@ class ImageGridApp:
         )
         f_detail.pack(fill=tk.X, pady=5)
 
-        f_d1 = ttk.Frame(f_detail)
-        f_d1.pack(fill=tk.X)
-        ttk.Label(f_d1, text="配置(Align):").pack(side=tk.LEFT)
+        # Row 1: Name, Color
+        f_r1 = ttk.Frame(f_detail)
+        f_r1.pack(fill=tk.X)
+        ttk.Label(f_r1, text="Name:").pack(side=tk.LEFT)
+        ttk.Entry(f_r1, textvariable=self.r_name, width=10).pack(side=tk.LEFT, padx=5)
+        self.btn_r_color = tk.Button(
+            f_r1, text="Color", width=5, command=lambda: self.pick_region_color()
+        )
+        self.btn_r_color.pack(side=tk.LEFT, padx=5)
+
+        # Row 2: Coords
+        f_r2 = ttk.Frame(f_detail)
+        f_r2.pack(fill=tk.X)
+        ttk.Label(f_r2, text="X:").pack(side=tk.LEFT)
+        ttk.Entry(f_r2, textvariable=self.r_x, width=5).pack(side=tk.LEFT)
+        ttk.Label(f_r2, text="Y:").pack(side=tk.LEFT)
+        ttk.Entry(f_r2, textvariable=self.r_y, width=5).pack(side=tk.LEFT)
+        ttk.Label(f_r2, text="W:").pack(side=tk.LEFT)
+        ttk.Entry(f_r2, textvariable=self.r_w, width=5).pack(side=tk.LEFT)
+        ttk.Label(f_r2, text="H:").pack(side=tk.LEFT)
+        ttk.Entry(f_r2, textvariable=self.r_h, width=5).pack(side=tk.LEFT)
+
+        # Row 3: Position props
+        f_r3 = ttk.Frame(f_detail)
+        f_r3.pack(fill=tk.X)
+        ttk.Label(f_r3, text="Align:").pack(side=tk.LEFT)
         ttk.Combobox(
-            f_d1,
+            f_r3,
             textvariable=self.r_align,
             values=["auto", "start", "center", "end"],
-            width=8,
-        ).pack(side=tk.LEFT, padx=5)
-        ttk.Label(f_d1, text="Offset(cm):").pack(side=tk.LEFT)
-        ttk.Entry(f_d1, textvariable=self.r_offset, width=6).pack(side=tk.LEFT, padx=5)
-        ttk.Label(f_d1, text="Gap(cm, 空欄=Global):").pack(side=tk.LEFT)
-        ttk.Entry(f_d1, textvariable=self.r_gap, width=6).pack(side=tk.LEFT, padx=5)
-        ttk.Button(f_d1, text="更新", command=self.update_region_detail).pack(
-            side=tk.LEFT, padx=10
+            width=7,
+        ).pack(side=tk.LEFT)
+        ttk.Label(f_r3, text="Offset:").pack(side=tk.LEFT)
+        ttk.Entry(f_r3, textvariable=self.r_offset, width=5).pack(side=tk.LEFT)
+        ttk.Label(f_r3, text="Gap:").pack(side=tk.LEFT)
+        ttk.Entry(f_r3, textvariable=self.r_gap, width=5).pack(side=tk.LEFT)
+
+        # Row 4: Action
+        f_r4 = ttk.Frame(f_detail)
+        f_r4.pack(fill=tk.X, pady=5)
+        ttk.Button(f_r4, text="更新 (Update)", command=self.update_region_detail).pack(
+            anchor=tk.E
         )
 
         # 3. Global Settings
@@ -1346,6 +1590,12 @@ class ImageGridApp:
             side=tk.LEFT, padx=5
         )
 
+    def pick_region_color(self):
+        c = colorchooser.askcolor(color=self.r_color)
+        if c[0]:
+            self.r_color = tuple(map(int, c[0]))
+            self.btn_r_color.config(bg=c[1])
+
     def on_region_select(self, event):
         sel = self.region_tree.selection()
         if not sel:
@@ -1353,6 +1603,12 @@ class ImageGridApp:
         self.sel_idx = self.region_tree.index(sel[0])
         r = self.crop_regions[self.sel_idx]
         self.r_name.set(r.name)
+        self.r_x.set(r.x)
+        self.r_y.set(r.y)
+        self.r_w.set(r.width)
+        self.r_h.set(r.height)
+        self.r_color = r.color
+        self.btn_r_color.config(bg=f"#{r.color[0]:02x}{r.color[1]:02x}{r.color[2]:02x}")
         self.r_align.set(r.align)
         self.r_offset.set(r.offset)
         self.r_gap.set(str(r.gap) if r.gap is not None else "")
@@ -1361,6 +1617,24 @@ class ImageGridApp:
         if self.sel_idx is None or self.sel_idx >= len(self.crop_regions):
             return
         r = self.crop_regions[self.sel_idx]
+        r.name = self.r_name.get()
+        try:
+            r.x = self.r_x.get()
+        except:
+            pass
+        try:
+            r.y = self.r_y.get()
+        except:
+            pass
+        try:
+            r.width = self.r_w.get()
+        except:
+            pass
+        try:
+            r.height = self.r_h.get()
+        except:
+            pass
+        r.color = self.r_color
         r.align = self.r_align.get()
         try:
             r.offset = self.r_offset.get()
@@ -1375,14 +1649,52 @@ class ImageGridApp:
         self.schedule_preview()
 
     def setup_tab_style(self):
-        f_style = ttk.LabelFrame(self.tab_style, text="枠線", padding=5)
-        f_style.pack(fill=tk.X)
+        f_style = ttk.LabelFrame(self.tab_style, text="枠線設定", padding=5)
+        f_style.pack(fill=tk.X, pady=5)
+
+        # --- 1. Source Image Border ---
+        f_src = ttk.LabelFrame(f_style, text="元画像上の枠線 (Source Image)", padding=5)
+        f_src.pack(fill=tk.X, pady=5)
+        f_src_row = ttk.Frame(f_src)
+        f_src_row.pack(fill=tk.X)
         ttk.Checkbutton(
-            f_style, text="Crop Border", variable=self.show_crop_border
-        ).pack(anchor=tk.W)
+            f_src_row, text="表示する", variable=self.show_crop_border
+        ).pack(side=tk.LEFT)
+        ttk.Label(f_src_row, text="太さ (pt):").pack(side=tk.LEFT, padx=(20, 5))
+        ttk.Entry(f_src_row, textvariable=self.crop_border_w, width=5).pack(
+            side=tk.LEFT
+        )
+
+        # --- 2. Cropped Image Border ---
+        f_zoom = ttk.LabelFrame(
+            f_style, text="クロップ画像の枠線 (Cropped Image)", padding=5
+        )
+        f_zoom.pack(fill=tk.X, pady=5)
+        f_zoom_row1 = ttk.Frame(f_zoom)
+        f_zoom_row1.pack(fill=tk.X)
         ttk.Checkbutton(
-            f_style, text="Zoom Border", variable=self.show_zoom_border
-        ).pack(anchor=tk.W)
+            f_zoom_row1, text="表示する", variable=self.show_zoom_border
+        ).pack(side=tk.LEFT)
+        ttk.Label(f_zoom_row1, text="太さ (pt):").pack(side=tk.LEFT, padx=(20, 5))
+        ttk.Entry(f_zoom_row1, textvariable=self.zoom_border_w, width=5).pack(
+            side=tk.LEFT
+        )
+
+        f_zoom_row2 = ttk.Frame(f_zoom)
+        f_zoom_row2.pack(fill=tk.X, pady=5)
+        ttk.Label(f_zoom_row2, text="形状:").pack(side=tk.LEFT)
+        ttk.Radiobutton(
+            f_zoom_row2,
+            text="角 (Rectangle)",
+            variable=self.zoom_border_shape,
+            value="rectangle",
+        ).pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(
+            f_zoom_row2,
+            text="丸 (Rounded)",
+            variable=self.zoom_border_shape,
+            value="rounded",
+        ).pack(side=tk.LEFT, padx=5)
 
     def browse_output(self):
         path = filedialog.asksaveasfilename(
@@ -1398,6 +1710,17 @@ class ImageGridApp:
             self.folder_listbox.insert(tk.END, p)
             self.schedule_preview()
 
+            # Auto-detect aspect ratio from first image
+            try:
+                images = get_sorted_images(p)
+                if images:
+                    with Image.open(images[0]) as img:
+                        w, h = img.size
+                        self.dummy_ratio_w.set(1.0)
+                        self.dummy_ratio_h.set(h / w)
+            except:
+                pass
+
     def remove_folder(self):
         s = self.folder_listbox.curselection()
         if s:
@@ -1408,6 +1731,39 @@ class ImageGridApp:
     def clear_folders(self):
         self.folders = []
         self.folder_listbox.delete(0, tk.END)
+        self.schedule_preview()
+
+    def open_crop_editor(self):
+        # Find first available image
+        target_img = None
+        for f in self.folders:
+            imgs = get_sorted_images(f)
+            if imgs:
+                target_img = imgs[0]
+                break
+
+        if not target_img:
+            # Ask user for a file
+            target_img = filedialog.askopenfilename(
+                filetypes=[("Images", "*.png;*.jpg;*.jpeg;*.bmp;*.webp")]
+            )
+
+        if not target_img:
+            return
+
+        # Always add new region regardless of selection
+        CropEditor(self.root, target_img, self.add_region_from_editor)
+
+    def add_region_from_editor(self, x, y, w, h, name):
+        r = CropRegion(x, y, w, h, (255, 0, 0), name)
+        self.crop_regions.append(r)
+        self.update_region_list()
+        self.schedule_preview()
+
+    def update_region_from_editor(self, idx, x, y, w, h, name):
+        r = self.crop_regions[idx]
+        r.x, r.y, r.width, r.height, r.name = x, y, w, h, name
+        self.update_region_list()
         self.schedule_preview()
 
     def add_region_dialog(self):
@@ -1532,6 +1888,12 @@ class ImageGridApp:
             if self.crop_scale_val.get() > 0:
                 c.crop_display.scale = self.crop_scale_val.get()
 
+        c.zoom_border_shape = self.zoom_border_shape.get()
+        c.show_crop_border = self.show_crop_border.get()
+        c.crop_border_width = self.crop_border_w.get()
+        c.show_zoom_border = self.show_zoom_border.get()
+        c.zoom_border_width = self.zoom_border_w.get()
+
         if c.rows == 0:
             c.rows = 1
         if c.cols == 0:
@@ -1576,6 +1938,11 @@ class ImageGridApp:
         dummy_w_px = 400
         dummy_h_px = 400 * (d_rh / d_rw)
 
+        # Border offset for preview
+        border_offset_cm = 0.0
+        if config.show_zoom_border:
+            border_offset_cm = pt_to_cm(config.zoom_border_width)
+
         for r in range(config.rows):
             current_row_h = (
                 metrics.row_heights[r]
@@ -1600,14 +1967,15 @@ class ImageGridApp:
                     )
                     has_crops = should_apply_crop(r, c, config)
 
-                    item_width = img_w_cm  # FIXED: Initialize item_width properly here
-
+                    item_width = img_w_cm
                     if has_crops and config.crop_regions:
                         num_crops = len(config.crop_regions)
                         disp = config.crop_display
                         actual_gap_mc = disp.main_crop_gap.to_cm(
                             img_w_cm if disp.position == "right" else img_h_cm
                         )
+                        if config.show_zoom_border:
+                            actual_gap_mc += border_offset_cm
 
                         if disp.position == "right":
                             # Add crops width
@@ -1618,7 +1986,7 @@ class ImageGridApp:
                                 else:
                                     c_w_dummy = img_w_cm * disp.scale
                             else:
-                                single_h = (img_h_cm) / num_crops
+                                single_h = (img_h_cm) / num_crops  # approx
                                 c_w_dummy, _ = calculate_size_fit_static(
                                     100, 100, metrics.crop_size, single_h, "fit"
                                 )
@@ -1637,7 +2005,11 @@ class ImageGridApp:
                         else:
                             # bottom
                             # Check if crop stack is wider than main
-                            actual_gap_cc = disp.crop_crop_gap.to_cm(img_h_cm)
+                            actual_gap_cc = disp.crop_crop_gap.to_cm(
+                                img_h_cm
+                            )  # bottom uses height ref approx
+                            if config.show_zoom_border:
+                                actual_gap_cc += border_offset_cm
 
                             # Estimate widths
                             c_w_sum = 0
@@ -1717,6 +2089,11 @@ class ImageGridApp:
                         img_w_cm if disp.position == "right" else img_h_cm
                     )
 
+                    # Compensate for border
+                    if config.show_zoom_border:
+                        actual_gap_mc += border_offset_cm
+                        actual_gap_cc += border_offset_cm
+
                     for crop_idx in range(num_crops):
                         region = config.crop_regions[crop_idx]
                         dummy_cw, dummy_ch = 100, 100
@@ -1740,7 +2117,7 @@ class ImageGridApp:
                                     dummy_cw,
                                     dummy_ch,
                                     metrics.crop_size,
-                                    single_slot_height,
+                                    single_h,
                                     "fit",
                                 )
                                 c_l = start_x
@@ -1758,6 +2135,9 @@ class ImageGridApp:
                             this_gap_mc = (
                                 region.gap if region.gap is not None else actual_gap_mc
                             )
+                            if region.gap is not None and config.show_zoom_border:
+                                this_gap_mc += border_offset_cm
+
                             c_l = main_l + img_w_cm + this_gap_mc
                             if region.align == "start":
                                 c_t = main_t + region.offset
@@ -1813,6 +2193,9 @@ class ImageGridApp:
                             this_gap_mc = (
                                 region.gap if region.gap is not None else actual_gap_mc
                             )
+                            if region.gap is not None and config.show_zoom_border:
+                                this_gap_mc += border_offset_cm
+
                             c_t = main_t + img_h_cm + this_gap_mc
                             if region.align == "start":
                                 c_l = main_l + region.offset
@@ -1884,6 +2267,7 @@ class ImageGridApp:
                     "zoom": {
                         "show": self.show_zoom_border.get(),
                         "width": self.zoom_border_w.get(),
+                        "shape": self.zoom_border_shape.get(),
                     },
                 },
                 "crop": {
@@ -1990,6 +2374,12 @@ class ImageGridApp:
         elif c.crop_display.scale:
             self.crop_size_mode.set("scale")
             self.crop_scale_val.set(c.crop_display.scale)
+
+        self.zoom_border_shape.set(c.zoom_border_shape)
+        self.show_crop_border.set(c.show_crop_border)
+        self.crop_border_w.set(c.crop_border_width)
+        self.show_zoom_border.set(c.show_zoom_border)
+        self.zoom_border_w.set(c.zoom_border_width)
 
     def generate(self):
         try:
