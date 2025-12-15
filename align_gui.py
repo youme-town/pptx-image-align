@@ -7,29 +7,20 @@ with images arranged in a grid layout.
 Features:
 - Interactive REAL-TIME PREVIEW of the slide layout.
 - Layout Mode (Grid vs Flow).
-- **NEW**: Flow Alignment (Left/Center/Right) fully implemented for both Preview and PPTX.
-- **UPDATED**: Flow Vertical Alignment (Top/Center/Bottom) aligns the entire block of rows relative to the slide.
+- Flow Alignment (Left/Center/Right) fully implemented for both Preview and PPTX.
+- Flow Vertical Alignment (Top/Center/Bottom) aligns the entire block of rows relative to the slide.
 - Fixed image size specification.
-- **RESTORED**: Crop row/column filters and detailed crop size settings.
-- **NEW**: Precise Gap Control (cm or scale) for Grid H/V, Main-Crop, Crop-Crop, and **Crop-Bottom**.
-- **NEW**: Image Aspect Ratio & Fit Mode control (Fit/Width/Height).
-- **NEW**: Per-Crop Alignment & Position Control.
-- **FIXED**: V-Align behavior in Flow mode now correctly handles complex crop arrangements.
-- **FIXED**: Preview crash in Flow mode.
-- **FIXED**: Bounds calculation unified for Preview and PPTX to ensure WYSIWYG.
-- **FIXED**: Crop alignment now accounts for border width (aligns visual edge).
-- **FIXED**: Fixed AttributeError in config loading.
-- **FIXED**: Fixed NameError (single_slot_width) in preview.
-- **FIXED**: Fixed TclError in CropEditor.
+- Crop row/column filters and detailed crop size settings.
+- Precise Gap Control (cm or scale) for Grid H/V, Main-Crop, Crop-Crop, and Crop-Bottom.
+- Image Aspect Ratio & Fit Mode control (Fit/Width/Height).
+- Per-Crop Alignment & Position Control.
 - Save/Load configuration to/from YAML files.
 """
 
 import os
 import re
-import sys
 import shutil
 import tempfile
-import threading
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Union
 from dataclasses import dataclass, field
@@ -832,20 +823,6 @@ def calculate_flow_row_heights(config, metrics, image_grid, border_offset_cm):
             _, _, _, max_y = calculate_item_bounds(
                 config, metrics, image_path, row_idx, col_idx, border_offset_cm
             )
-            # Bounds are relative to main image top-left (0,0). So height is max_y - min_y,
-            # BUT we assume main image is aligned to row top?
-            # Actually flow layout aligns items within a row based on their height.
-            # Usually row height = max(item_height).
-            # calculate_item_bounds returns min_y which might be negative if crop is above main.
-            # Height contribution is max_y - min_y.
-
-            # We need to know if min_y is negative.
-            # If min_y < 0, it means crop extends ABOVE the main image.
-            # The "row top" must accommodate this.
-
-            # Let's assume calculate_item_bounds is correct size.
-            # Item height = max_y - min_y.
-
             # Re-calling it to get min_y as well
             min_x, min_y, max_x, max_y = calculate_item_bounds(
                 config, metrics, image_path, row_idx, col_idx, border_offset_cm
@@ -906,17 +883,10 @@ def create_grid_presentation(config: GridConfig) -> str:
             total_content_height += rh
             if i < len(flow_row_heights) - 1:
                 # Add gap between rows
-                # Gap is gap_v.
-                # config.gap_v can be scale-based.
-                # We need a reference. Use main_height from metrics as base reference?
-                # Or use current row height?
-                # Let's use metric main_height for scale reference to be consistent with Grid
                 gap_val = config.gap_v.to_cm(metrics.main_height)
                 total_content_height += gap_val
     else:
         # Grid mode height is fixed by definition
-        # But wait, user wants V-Align for grid? Usually Grid fills space or starts from margin_top.
-        # Current logic: Starts at margin_top.
         pass
 
     try:
@@ -927,11 +897,6 @@ def create_grid_presentation(config: GridConfig) -> str:
             if config.flow_vertical_align == "center":
                 current_y = config.margin_top + (avail_h - total_content_height) / 2
             elif config.flow_vertical_align == "bottom":
-                current_y = config.margin_top + (
-                    avail_h - total_content_height
-                )  # Align to bottom margin? Or slide bottom?
-                # If we align to slide bottom margin: margin_top + avail_h is bottom margin line.
-                # So start = (margin_top + avail_h) - total_h
                 current_y = (config.margin_top + avail_h) - total_content_height
             else:  # top
                 current_y = config.margin_top
@@ -1019,9 +984,6 @@ def create_grid_presentation(config: GridConfig) -> str:
                 global_gap_cc = config.crop_display.crop_crop_gap.to_cm(
                     orig_w if config.crop_display.position == "right" else orig_h
                 )
-                global_gap_cb = config.crop_display.crop_bottom_gap.to_cm(
-                    orig_w if config.crop_display.position == "right" else orig_h
-                )
 
                 # Compensate for border
                 if config.show_zoom_border:
@@ -1052,9 +1014,6 @@ def create_grid_presentation(config: GridConfig) -> str:
                     # Center in grid cell
                     item_draw_left = current_x + (cell_w - item_w) / 2
                     # Grid Row Height is in metrics or calculated.
-                    # If we used metrics.row_heights, it might be smaller/larger than item.
-                    # For grid, usually we center in the allocated slot.
-                    # current_row_height from metrics is used.
                     item_draw_top = current_y + (current_row_height - item_h) / 2
 
                 # Calculate absolute position for Main Image
@@ -1299,6 +1258,8 @@ class CropEditor(tk.Toplevel):
         # Resize image to fit canvas
         self.display_scale = 1.0
         self.tk_img = None
+        self.off_x = 0
+        self.off_y = 0
 
         self.bind("<Configure>", self.on_resize_window)
         self.canvas.bind("<ButtonPress-1>", self.on_press)
@@ -2248,7 +2209,6 @@ class ImageGridApp:
 
         if config.layout_mode == "flow":
             # Simulate row heights
-            sim_cy = config.margin_top
             for r in range(config.rows):
                 sim_row_h = 0.0
                 sim_items = 0
@@ -2269,7 +2229,7 @@ class ImageGridApp:
 
                     # Check if cell is active (mock logic: all cells active in preview)
                     # In real logic, we check image path. In preview we check loop range.
-                    has_crops = should_apply_crop(r, c, config)
+                    # has_crops = should_apply_crop(r, c, config) # Used in logic
 
                     # We need to simulate bounds calculation for height
                     # ... reuse logic inside loop
@@ -2471,7 +2431,7 @@ class ImageGridApp:
                             if region.align == "start":
                                 c_t = main_t + region.offset + half_border
                             elif region.align == "center":
-                                c_t = final_main_top + (orig_h - ch) / 2 + region.offset
+                                c_t = main_t + (img_h_cm - c_h) / 2 + region.offset
                             elif region.align == "end":
                                 c_t = (
                                     main_t
@@ -2480,6 +2440,24 @@ class ImageGridApp:
                                     + region.offset
                                     - half_border
                                 )
+                            else:  # auto
+                                if disp.scale is not None or disp.size is not None:
+                                    # Stack logic
+                                    c_t = main_t + crop_idx * (ch + global_gap_cc)
+                                else:
+                                    # Fit logic (Pin ends)
+                                    if crop_idx == 0:
+                                        c_t = main_t
+                                    elif num_crops > 1 and crop_idx == num_crops - 1:
+                                        c_t = (main_t + img_h_cm) - c_h
+                                    else:
+                                        single_h = (
+                                            img_h_cm - global_gap_cc * (num_crops - 1)
+                                        ) / num_crops
+                                        slot_top = main_t + crop_idx * (
+                                            single_h + global_gap_cc
+                                        )
+                                        c_t = slot_top + (single_h - c_h) / 2
 
                             canvas.create_rectangle(
                                 tx(c_l),
