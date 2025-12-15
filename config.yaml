@@ -1,0 +1,82 @@
+border:
+  crop:
+    shape: rectangle
+    show: true
+    width: 1.5
+  zoom:
+    shape: rectangle
+    show: true
+    width: 1.5
+crop:
+  cols: null
+  display:
+    crop_bottom_gap:
+      mode: cm
+      value: 0.0
+    crop_crop_gap:
+      mode: cm
+      value: 0.15
+    main_crop_gap:
+      mode: cm
+      value: 0.15
+    position: bottom
+    scale: 0.45
+    size: null
+  regions:
+  - align: end
+    color:
+    - 0
+    - 255
+    - 0
+    gap: null
+    height: 100
+    name: Region B
+    offset: 0.0
+    width: 100
+    x: 200
+    y: 100
+  - align: start
+    color:
+    - 255
+    - 0
+    - 0
+    gap: null
+    height: 260
+    name: Region
+    offset: 0.0
+    width: 263
+    x: 311
+    y: 1040
+  rows:
+  - 2
+folders:
+- ./images/row1
+- ./images/row2
+gap:
+  horizontal:
+    mode: cm
+    value: 0.15
+  vertical:
+    mode: cm
+    value: 0.15
+grid:
+  arrangement: row
+  cols: 3
+  flow_align: center
+  flow_vertical_align: center
+  layout_mode: flow
+  rows: 2
+image:
+  fit_mode: fit
+  height: 7.5
+  size_mode: fit
+  width: 10.0
+margin:
+  bottom: 1.0
+  left: 1.0
+  right: 1.0
+  top: 1.0
+output: output.pptx
+slide:
+  height: 19.05
+  width: 33.867
