@@ -209,5 +209,4 @@ __marimo__/
 *.yaml
 !config.yaml
 
-
-output.pptx
+*.pptx
