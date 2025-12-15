@@ -1,14 +1,15 @@
 """
-PowerPoint Image Grid Generator CLI (v24 Compatible)
-
+PowerPoint Image Grid Generator CLI
 This script creates a PowerPoint presentation with images arranged in a grid layout.
-It supports all advanced layout features found in the GUI version v24, including:
+It supports all advanced layout features found in the GUI version, including:
 - Layout Modes: Grid (aligned) and Flow (packed).
 - Flow Alignment: Left, Center, Right.
+- Flow Vertical Alignment: Top, Center, Bottom.
 - Precise Gap Control: cm or scale relative to image size.
 - Image Fit Modes: Fit, Width, Height.
 - Per-Crop Alignment: Start, Center, End with offsets.
 - Crop-Bottom Gap support.
+- Border shapes (Rectangle/Rounded).
 
 Usage:
   python image_grid_cli.py config.yaml
@@ -43,6 +44,12 @@ def cm_to_emu(cm: float) -> int:
 
 def pt_to_emu(pt: float) -> int:
     return int(pt * PT_TO_EMU)
+
+
+def pt_to_cm(pt: float) -> float:
+    """Convert points to centimeters."""
+    # 1 inch = 2.54 cm = 72 points
+    return pt * (2.54 / 72.0)
 
 
 @dataclass
@@ -98,6 +105,9 @@ class GridConfig:
     # Layout Logic
     layout_mode: str = "grid"  # 'grid' (aligned) or 'flow' (compact)
     flow_align: str = "left"  # 'left', 'center', 'right' (Only for flow mode)
+    flow_vertical_align: str = (
+        "center"  # 'top', 'center', 'bottom' (Only for flow mode)
+    )
 
     # Image sizing
     size_mode: str = "fit"  # 'fit' or 'fixed'
@@ -115,6 +125,8 @@ class GridConfig:
     crop_border_width: float = 1.5
     show_zoom_border: bool = True
     zoom_border_width: float = 1.5
+    zoom_border_shape: str = "rectangle"  # 'rectangle' or 'rounded'
+
     folders: List[str] = field(default_factory=list)
     output: str = "output.pptx"
 
@@ -141,7 +153,6 @@ def parse_gap(data) -> GapConfig:
 
 
 def load_config(config_path: str) -> GridConfig:
-    """Load configuration from YAML file."""
     with open(config_path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
 
@@ -159,6 +170,9 @@ def load_config(config_path: str) -> GridConfig:
         config.arrangement = grid.get("arrangement", config.arrangement)
         config.layout_mode = grid.get("layout_mode", config.layout_mode)
         config.flow_align = grid.get("flow_align", config.flow_align)
+        config.flow_vertical_align = grid.get(
+            "flow_vertical_align", config.flow_vertical_align
+        )
 
     if "margin" in data:
         margin = data["margin"]
@@ -259,6 +273,7 @@ def load_config(config_path: str) -> GridConfig:
             zb = border["zoom"]
             config.show_zoom_border = zb.get("show", config.show_zoom_border)
             config.zoom_border_width = zb.get("width", config.zoom_border_width)
+            config.zoom_border_shape = zb.get("shape", config.zoom_border_shape)
 
     if "folders" in data:
         config.folders = data["folders"]
@@ -276,7 +291,7 @@ def get_sorted_images(folder_path: str) -> List[str]:
     supported_extensions = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp"}
     folder = Path(folder_path)
     if not folder.exists():
-        raise FileNotFoundError(f"Folder not found: {folder_path}")
+        return []
 
     image_files = [
         f
@@ -357,9 +372,14 @@ def add_border_shape(
     height: float,
     border_color: tuple[int, int, int],
     border_width: float,
+    shape_type: str = "rectangle",
 ):
+    ms_shape_type = MSO_SHAPE.RECTANGLE
+    if shape_type == "rounded":
+        ms_shape_type = MSO_SHAPE.ROUNDED_RECTANGLE
+
     shape = slide.shapes.add_shape(
-        MSO_SHAPE.RECTANGLE,
+        ms_shape_type,
         cm_to_emu(left),
         cm_to_emu(top),
         cm_to_emu(width),
@@ -402,7 +422,8 @@ def add_crop_borders_to_image(
             border_h,
             region.color,
             border_width,
-        )
+            "rectangle",
+        )  # Original image crop marks are always rects
 
 
 @dataclass
@@ -457,6 +478,13 @@ def calculate_grid_metrics(config: GridConfig) -> LayoutMetrics:
         est_main_w if disp.position == "right" else est_main_h
     )
 
+    # Border offset compensation
+    border_offset = 0.0
+    if config.show_zoom_border:
+        border_offset = pt_to_cm(config.zoom_border_width)
+        gap_mc += border_offset
+        gap_cc += border_offset
+
     main_w = 0.0
     main_h = 0.0
     crop_box_size = 0.0
@@ -500,6 +528,7 @@ def calculate_grid_metrics(config: GridConfig) -> LayoutMetrics:
             else:
                 crop_k = 0.33
 
+            # Note: gap_mc includes border offset now
             denom = config.cols + num_exp_cols * crop_k
             numer = avail_w_for_cells - num_exp_cols * (gap_mc + crop_c)
             main_w = numer / denom
@@ -531,8 +560,7 @@ def calculate_grid_metrics(config: GridConfig) -> LayoutMetrics:
                 col_widths.append(main_w + extra)
             else:
                 col_widths.append(main_w)
-        # Note: Vertical space for crops (if they exceed main_h) isn't fully calculated here for Grid mode
-        # Simple approximation for now
+
         row_heights = [main_h] * config.rows
     else:
         # Bottom placement expands row height
@@ -547,6 +575,265 @@ def calculate_grid_metrics(config: GridConfig) -> LayoutMetrics:
     return LayoutMetrics(
         main_w, main_h, col_widths, row_heights, crop_box_size, gap_mc, gap_cc, gap_cb
     )
+
+
+# --- Helper: Calculate Item Bounds ---
+def calculate_item_bounds(
+    config,
+    metrics,
+    image_path,
+    row_idx,
+    col_idx,
+    border_offset_cm=0.0,
+    override_size=None,
+):
+    """
+    Returns (min_x, min_y, max_x, max_y) bounding box relative to Main Image Top-Left (0,0).
+    """
+    has_crops = should_apply_crop(row_idx, col_idx, config)
+
+    if override_size:
+        orig_w, orig_h = override_size
+    elif image_path == "dummy":
+        # Fallback if no override size is passed for dummy, use default fit
+        return 0, 0, 0, 0
+    else:
+        orig_w, orig_h = calculate_image_size_fit(
+            image_path, metrics.main_width, metrics.main_height, config.fit_mode
+        )
+
+    min_x, min_y = 0.0, 0.0
+    max_x, max_y = orig_w, orig_h
+
+    # Half-border offset for alignment logic
+    # We want the "visual edge" (including border) to align with the main image edge.
+    # The border is drawn centered on the shape path. So it extends border_width/2 outward.
+    half_border = border_offset_cm / 2.0 if config.show_zoom_border else 0.0
+
+    if has_crops and config.crop_regions:
+        num_crops = len(config.crop_regions)
+        disp = config.crop_display
+        actual_gap_mc = disp.main_crop_gap.to_cm(
+            orig_w if disp.position == "right" else orig_h
+        )
+        actual_gap_cc = disp.crop_crop_gap.to_cm(
+            orig_w if disp.position == "right" else orig_h
+        )
+        actual_gap_cb = disp.crop_bottom_gap.to_cm(
+            orig_w if disp.position == "right" else orig_h
+        )
+
+        if config.show_zoom_border:
+            actual_gap_mc += border_offset_cm
+            actual_gap_cc += border_offset_cm
+
+        if disp.position == "right":
+            # Base start X for crops
+            start_x = orig_w + actual_gap_mc
+
+            # We must simulate placement to find bounds
+            for crop_idx, region in enumerate(config.crop_regions):
+                # Calculate Crop Size
+                cw, ch = 0, 0
+
+                # Check for DUMMY context to decide if we use path or dummy assumption
+                if override_size:
+                    # Dummy dimensions
+                    if disp.size is not None:
+                        cw, ch = calculate_size_fit_static(
+                            100, 100, disp.size, 9999, "width"
+                        )
+                    elif disp.scale is not None:
+                        tw = orig_w * disp.scale
+                        cw, ch = calculate_size_fit_static(100, 100, tw, 9999, "width")
+                    else:
+                        single_h = (
+                            orig_h - actual_gap_cc * (num_crops - 1)
+                        ) / num_crops
+                        cw, ch = calculate_size_fit_static(
+                            100, 100, metrics.crop_size, single_h, "fit"
+                        )
+                else:
+                    # Real image path logic
+                    if disp.size is not None:
+                        cw, ch = calculate_image_size_fit(
+                            image_path, disp.size, 9999, "width"
+                        )
+                    elif disp.scale is not None:
+                        tw = orig_w * disp.scale
+                        cw, ch = calculate_image_size_fit(image_path, tw, 9999, "width")
+                    else:
+                        # Fit
+                        single_h = (
+                            orig_h - actual_gap_cc * (num_crops - 1)
+                        ) / num_crops
+                        cw, ch = calculate_image_size_fit(
+                            image_path, metrics.crop_size, single_h, "fit"
+                        )
+
+                # Position logic
+                this_gap_mc = region.gap if region.gap is not None else actual_gap_mc
+                if region.gap is not None and config.show_zoom_border:
+                    this_gap_mc += border_offset_cm
+
+                # Current crop left
+                c_left = orig_w + this_gap_mc
+
+                # Y-Alignment logic (relative to main top 0)
+                c_top = 0.0
+                if region.align == "start":
+                    # Align outer visual edge to top
+                    c_top = 0.0 + region.offset + half_border
+                elif region.align == "center":
+                    c_top = (orig_h - ch) / 2 + region.offset
+                elif region.align == "end":
+                    # Align outer visual edge to bottom
+                    c_top = orig_h - ch + region.offset - half_border
+                else:  # auto
+                    if disp.scale is not None or disp.size is not None:
+                        # Stack from top
+                        c_top = crop_idx * (ch + actual_gap_cc)
+                    else:
+                        # Fit logic (Pin ends)
+                        if crop_idx == 0:
+                            c_top = 0.0
+                        elif num_crops > 1 and crop_idx == num_crops - 1:
+                            c_top = orig_h - ch
+                        else:
+                            # Recalc single_h if needed or use approx
+                            single_h = (
+                                orig_h - actual_gap_cc * (num_crops - 1)
+                            ) / num_crops
+                            slot_top = crop_idx * (single_h + actual_gap_cc)
+                            c_top = slot_top + (single_h - ch) / 2
+
+                # Update bounds
+                if c_left < min_x:
+                    min_x = c_left
+                if c_top < min_y:
+                    min_y = c_top
+                if (c_left + cw) > max_x:
+                    max_x = c_left + cw
+                if (c_top + ch) > max_y:
+                    max_y = c_top + ch
+
+        else:  # bottom
+            # Base start Y for crops
+            start_y = orig_h + actual_gap_mc
+
+            for crop_idx, region in enumerate(config.crop_regions):
+                cw, ch = 0, 0
+                if override_size:
+                    if disp.size is not None:
+                        cw, ch = calculate_size_fit_static(
+                            100, 100, 9999, disp.size, "height"
+                        )
+                    elif disp.scale is not None:
+                        th = orig_h * disp.scale
+                        cw, ch = calculate_size_fit_static(100, 100, 9999, th, "height")
+                    else:
+                        sw = (orig_w - actual_gap_cc * (num_crops - 1)) / num_crops
+                        cw, ch = calculate_size_fit_static(
+                            100, 100, sw, metrics.crop_size, "fit"
+                        )
+                else:
+                    if disp.size is not None:
+                        cw, ch = calculate_image_size_fit(
+                            image_path, 9999, disp.size, "height"
+                        )
+                    elif disp.scale is not None:
+                        th = orig_h * disp.scale
+                        cw, ch = calculate_image_size_fit(
+                            image_path, 9999, th, "height"
+                        )
+                    else:
+                        sw = (orig_w - actual_gap_cc * (num_crops - 1)) / num_crops
+                        cw, ch = calculate_image_size_fit(
+                            image_path, sw, metrics.crop_size, "fit"
+                        )
+
+                this_gap_mc = region.gap if region.gap is not None else actual_gap_mc
+                if region.gap is not None and config.show_zoom_border:
+                    this_gap_mc += border_offset_cm
+
+                c_top = orig_h + this_gap_mc
+
+                # X-Alignment
+                c_left = 0.0
+                if region.align == "start":
+                    # Align outer visual edge to left
+                    c_left = 0.0 + region.offset + half_border
+                elif region.align == "center":
+                    c_left = (orig_w - cw) / 2 + region.offset
+                elif region.align == "end":
+                    # Align outer visual edge to right
+                    c_left = orig_w - cw + region.offset - half_border
+                else:  # auto
+                    if disp.scale is not None or disp.size is not None:
+                        c_left = crop_idx * (cw + actual_gap_cc)
+                    else:
+                        if crop_idx == 0:
+                            c_left = 0.0
+                        elif num_crops > 1 and crop_idx == num_crops - 1:
+                            c_left = orig_w - cw
+                        else:
+                            sw = (orig_w - actual_gap_cc * (num_crops - 1)) / num_crops
+                            slot_left = crop_idx * (sw + actual_gap_cc)
+                            c_left = slot_left + (sw - cw) / 2
+
+                if c_left < min_x:
+                    min_x = c_left
+                if c_top < min_y:
+                    min_y = c_top
+                if (c_left + cw) > max_x:
+                    max_x = c_left + cw
+                if (c_top + ch) > max_y:
+                    max_y = c_top + ch
+
+            # Apply bottom gap to height?
+            max_y += actual_gap_cb
+
+    return min_x, min_y, max_x, max_y
+
+
+def calculate_flow_row_heights(config, metrics, image_grid, border_offset_cm):
+    """
+    Simulates flow layout to calculate the max content height for each row.
+    Used for vertical alignment of rows on the slide.
+    """
+    row_heights = []
+
+    for row_idx, row_images in enumerate(image_grid):
+        if row_idx >= config.rows:
+            break
+
+        row_max_h = 0.0
+
+        for col_idx, image_path in enumerate(row_images):
+            if col_idx >= config.cols:
+                break
+            if image_path is None:
+                continue
+
+            # Get TRUE bounding box height of the item
+            _, _, _, max_y = calculate_item_bounds(
+                config, metrics, image_path, row_idx, col_idx, border_offset_cm
+            )
+            # Re-calling it to get min_y as well
+            min_x, min_y, max_x, max_y = calculate_item_bounds(
+                config, metrics, image_path, row_idx, col_idx, border_offset_cm
+            )
+            item_h = max_y - min_y
+            if item_h > row_max_h:
+                row_max_h = item_h
+
+        # If no items, use metric default
+        if row_max_h == 0.0:
+            row_max_h = metrics.main_height
+
+        row_heights.append(row_max_h)
+
+    return row_heights
 
 
 def create_grid_presentation(config: GridConfig) -> str:
@@ -570,20 +857,65 @@ def create_grid_presentation(config: GridConfig) -> str:
     num_crops = len(config.crop_regions)
     metrics = calculate_grid_metrics(config)
 
+    # Calculate Border Offset for placement
+    border_offset_cm = 0.0
+    if config.show_zoom_border:
+        border_offset_cm = pt_to_cm(config.crop_border_width)
+
+    # Calculate half-border for alignment logic
+    half_border = border_offset_cm / 2.0 if config.show_zoom_border else 0.0
+
+    # 1. Calculate actual row heights for Flow Mode (Vertical Packing)
+    flow_row_heights = []
+    if config.layout_mode == "flow":
+        flow_row_heights = calculate_flow_row_heights(
+            config, metrics, image_grid, border_offset_cm
+        )
+
+    # 2. Calculate Total Slide Content Height for Flow Vertical Align (Slide-level)
+    total_content_height = 0.0
+    if config.layout_mode == "flow":
+        for i, rh in enumerate(flow_row_heights):
+            total_content_height += rh
+            if i < len(flow_row_heights) - 1:
+                # Add gap between rows
+                gap_val = config.gap_v.to_cm(metrics.main_height)
+                total_content_height += gap_val
+    else:
+        # Grid mode height is fixed by definition
+        pass
+
     try:
+        # Determine Start Y based on Flow V-Align
         current_y = config.margin_top
+        if config.layout_mode == "flow":
+            avail_h = config.slide_height - config.margin_top - config.margin_bottom
+            if config.flow_vertical_align == "center":
+                current_y = config.margin_top + (avail_h - total_content_height) / 2
+            elif config.flow_vertical_align == "bottom":
+                current_y = (config.margin_top + avail_h) - total_content_height
+            else:  # top
+                current_y = config.margin_top
 
         for row_idx, row_images in enumerate(image_grid):
             if row_idx >= config.rows:
                 break
 
+            # Determine Row Height for this row
+            if config.layout_mode == "flow":
+                if row_idx < len(flow_row_heights):
+                    current_row_height = flow_row_heights[row_idx]
+                else:
+                    current_row_height = metrics.main_height
+            else:
+                current_row_height = (
+                    metrics.row_heights[row_idx]
+                    if row_idx < len(metrics.row_heights)
+                    else metrics.main_height
+                )
+
             this_gap_v = config.gap_v.to_cm(metrics.main_height)
             current_x = config.margin_left
-            current_row_height = (
-                metrics.row_heights[row_idx]
-                if row_idx < len(metrics.row_heights)
-                else metrics.main_height
-            )
 
             # --- Pre-calculate row total width for alignment if in flow mode ---
             row_total_content_width = 0.0
@@ -596,91 +928,13 @@ def create_grid_presentation(config: GridConfig) -> str:
                     if image_path is None:
                         continue
 
-                    has_crops = should_apply_crop(row_idx, col_idx, config)
-                    orig_w, orig_h = calculate_image_size_fit(
-                        image_path,
-                        metrics.main_width,
-                        metrics.main_height,
-                        config.fit_mode,
+                    min_x, min_y, max_x, max_y = calculate_item_bounds(
+                        config, metrics, image_path, row_idx, col_idx, border_offset_cm
                     )
+                    item_w = max_x - min_x
+                    # item_h = max_y - min_y # Already used for row height
 
-                    item_width = orig_w
-                    if has_crops and num_crops > 0:
-                        disp = config.crop_display
-                        actual_gap_mc = disp.main_crop_gap.to_cm(
-                            orig_w if disp.position == "right" else orig_h
-                        )
-                        if disp.position == "right":
-                            max_crop_ext = 0
-                            for ci, r_crop in enumerate(config.crop_regions):
-                                crop_w = 0
-                                if disp.size is not None:
-                                    if disp.position == "right":
-                                        crop_w, _ = calculate_size_fit_static(
-                                            100, 100, disp.size, 9999, "width"
-                                        )
-                                    else:
-                                        crop_w, _ = calculate_size_fit_static(
-                                            100, 100, 9999, disp.size, "height"
-                                        )
-                                elif disp.scale is not None:
-                                    if disp.position == "right":
-                                        tw = orig_w * disp.scale
-                                        crop_w, _ = calculate_size_fit_static(
-                                            100, 100, tw, 9999, "width"
-                                        )
-                                    else:
-                                        th = orig_h * disp.scale
-                                        crop_w, _ = calculate_size_fit_static(
-                                            100, 100, 9999, th, "height"
-                                        )
-                                else:
-                                    crop_w = metrics.crop_size
-
-                                this_gap = (
-                                    r_crop.gap
-                                    if r_crop.gap is not None
-                                    else actual_gap_mc
-                                )
-                                current_ext = this_gap + crop_w
-                                if current_ext > max_crop_ext:
-                                    max_crop_ext = current_ext
-                            item_width += max_crop_ext
-                        else:
-                            # bottom
-                            # Check if crop stack is wider than main
-                            actual_gap_cc = disp.crop_crop_gap.to_cm(
-                                orig_h
-                            )  # bottom uses height ref approx
-
-                            # Estimate widths
-                            c_w_sum = 0
-                            for ci, r_crop in enumerate(config.crop_regions):
-                                c_w = 0
-                                if disp.size is not None:
-                                    c_w, _ = calculate_size_fit_static(
-                                        100, 100, 9999, disp.size, "height"
-                                    )
-                                elif disp.scale is not None:
-                                    th = orig_h * disp.scale
-                                    c_w, _ = calculate_size_fit_static(
-                                        100, 100, 9999, th, "height"
-                                    )
-                                else:
-                                    sw = (
-                                        orig_w - actual_gap_cc * (num_crops - 1)
-                                    ) / num_crops
-                                    c_w, _ = calculate_size_fit_static(
-                                        100, 100, sw, metrics.crop_size, "fit"
-                                    )
-                                c_w_sum += c_w
-
-                            if num_crops > 1:
-                                c_w_sum += actual_gap_cc * (num_crops - 1)
-                            if c_w_sum > item_width:
-                                item_width = c_w_sum
-
-                    row_total_content_width += item_width
+                    row_total_content_width += item_w
                     valid_items += 1
 
                 if valid_items > 1:
@@ -696,7 +950,6 @@ def create_grid_presentation(config: GridConfig) -> str:
                     current_x = config.margin_left + (avail_w - row_total_content_width)
                 else:
                     current_x = config.margin_left
-
             # --- End Pre-calculation ---
 
             for col_idx, image_path in enumerate(row_images):
@@ -727,16 +980,42 @@ def create_grid_presentation(config: GridConfig) -> str:
                 global_gap_cc = config.crop_display.crop_crop_gap.to_cm(
                     orig_w if config.crop_display.position == "right" else orig_h
                 )
-                global_gap_cb = config.crop_display.crop_bottom_gap.to_cm(
-                    orig_w if config.crop_display.position == "right" else orig_h
+
+                # Compensate for border
+                if config.show_zoom_border:
+                    global_gap_mc += border_offset_cm
+                    global_gap_cc += border_offset_cm
+
+                # Determine Main Image Position using Bounding Box Offset
+                min_x, min_y, max_x, max_y = calculate_item_bounds(
+                    config, metrics, image_path, row_idx, col_idx, border_offset_cm
                 )
+                item_w = max_x - min_x
+                item_h = max_y - min_y
 
                 if config.layout_mode == "flow":
-                    final_main_left = current_x
-                    final_main_top = current_y + (metrics.main_height - orig_h) / 2
+                    # Item left is current_x
+                    item_draw_left = current_x
+
+                    # Align Item Vertically WITHIN Row
+                    # Row height is current_row_height.
+                    # We center the item in the row line.
+                    item_draw_top = current_y + (current_row_height - item_h) / 2
                 else:
-                    final_main_left = current_x + (metrics.main_width - orig_w) / 2
-                    final_main_top = current_y + (metrics.main_height - orig_h) / 2
+                    cell_w = (
+                        metrics.col_widths[col_idx]
+                        if col_idx < len(metrics.col_widths)
+                        else metrics.main_width
+                    )
+                    # Center in grid cell
+                    item_draw_left = current_x + (cell_w - item_w) / 2
+                    # Grid Row Height is in metrics or calculated.
+                    item_draw_top = current_y + (current_row_height - item_h) / 2
+
+                # Calculate absolute position for Main Image
+                # Main Image is at (0-min_x, 0-min_y) relative to Item Top-Left
+                final_main_left = item_draw_left - min_x
+                final_main_top = item_draw_top - min_y
 
                 pic = slide.shapes.add_picture(
                     image_path,
@@ -758,9 +1037,6 @@ def create_grid_presentation(config: GridConfig) -> str:
                         config.crop_regions,
                         config.crop_border_width,
                     )
-
-                content_right_edge = final_main_left + orig_w
-                content_bottom_edge = final_main_top + orig_h
 
                 if has_crops and num_crops > 0:
                     disp = config.crop_display
@@ -815,20 +1091,26 @@ def create_grid_presentation(config: GridConfig) -> str:
                         this_gap_mc = (
                             region.gap if region.gap is not None else global_gap_mc
                         )
+                        if region.gap is not None and config.show_zoom_border:
+                            this_gap_mc += border_offset_cm
 
-                        # Resolve Alignment Position
+                        # Resolve Position
                         if disp.position == "right":
                             c_left = final_main_left + orig_w + this_gap_mc
-
-                            # Y-Alignment
                             if region.align == "start":
-                                c_top = final_main_top + region.offset
+                                c_top = final_main_top + region.offset + half_border
                             elif region.align == "center":
                                 c_top = (
                                     final_main_top + (orig_h - ch) / 2 + region.offset
                                 )
                             elif region.align == "end":
-                                c_top = final_main_top + orig_h - ch + region.offset
+                                c_top = (
+                                    final_main_top
+                                    + orig_h
+                                    - ch
+                                    + region.offset
+                                    - half_border
+                                )
                             else:  # auto
                                 if disp.scale is not None or disp.size is not None:
                                     # Stack logic
@@ -849,22 +1131,22 @@ def create_grid_presentation(config: GridConfig) -> str:
                                             single_h + global_gap_cc
                                         )
                                         c_top = slot_top + (single_h - ch) / 2
-
-                            content_right_edge = max(content_right_edge, c_left + cw)
-                            content_bottom_edge = max(content_bottom_edge, c_top + ch)
-
                         else:  # bottom
                             c_top = final_main_top + orig_h + this_gap_mc
-
-                            # X-Alignment
                             if region.align == "start":
-                                c_left = final_main_left + region.offset
+                                c_left = final_main_left + region.offset + half_border
                             elif region.align == "center":
                                 c_left = (
                                     final_main_left + (orig_w - cw) / 2 + region.offset
                                 )
                             elif region.align == "end":
-                                c_left = final_main_left + orig_w - cw + region.offset
+                                c_left = (
+                                    final_main_left
+                                    + orig_w
+                                    - cw
+                                    + region.offset
+                                    - half_border
+                                )
                             else:  # auto
                                 if disp.scale is not None or disp.size is not None:
                                     c_left = final_main_left + crop_idx * (
@@ -884,9 +1166,6 @@ def create_grid_presentation(config: GridConfig) -> str:
                                         )
                                         c_left = slot_left + (single_w - cw) / 2
 
-                            content_bottom_edge = max(content_bottom_edge, c_top + ch)
-                            content_right_edge = max(content_right_edge, c_left + cw)
-
                         pic_crop = slide.shapes.add_picture(
                             crop_path,
                             cm_to_emu(c_left),
@@ -905,15 +1184,11 @@ def create_grid_presentation(config: GridConfig) -> str:
                                 ch,
                                 region.color,
                                 config.zoom_border_width,
+                                config.zoom_border_shape,
                             )
 
-                # Apply Crop-Bottom Gap to content extent if crops exist
-                if has_crops and num_crops > 0:
-                    content_bottom_edge += global_gap_cb
-
                 if config.layout_mode == "flow":
-                    width_used = content_right_edge - current_x
-                    current_x += width_used + this_gap_h
+                    current_x += item_w + this_gap_h
                 else:
                     w = (
                         metrics.col_widths[col_idx]
@@ -922,6 +1197,7 @@ def create_grid_presentation(config: GridConfig) -> str:
                     )
                     current_x += w + this_gap_h
 
+            # Row Advance Logic
             current_y += current_row_height + this_gap_v
 
         prs.save(config.output)
@@ -934,7 +1210,7 @@ def create_grid_presentation(config: GridConfig) -> str:
 
 def generate_sample_config(output_path: str):
     """Generate a sample configuration file."""
-    sample = """# PowerPoint Image Grid Generator - Configuration File
+    sample = """# PowerPoint Image Grid Generator - Configuration File (v24 Compatible)
 # Size values are in centimeters (cm) unless otherwise specified (e.g. pt)
 
 # Slide size settings
@@ -947,8 +1223,9 @@ grid:
   rows: 2
   cols: 3
   arrangement: row  # 'row' or 'col'
-  layout_mode: grid # 'grid' (aligned) or 'flow' (compact)
+  layout_mode: flow # 'grid' (aligned) or 'flow' (compact)
   flow_align: left # 'left', 'center', 'right' (only for flow)
+  flow_vertical_align: center # 'top', 'center', 'bottom' (only for flow)
 
 # Margins around the grid (cm)
 margin:
@@ -1015,6 +1292,7 @@ border:
   zoom:
     show: true
     width: 1.5  # Line width in points (pt)
+    shape: rectangle # 'rectangle' or 'rounded'
 
 # Input folders
 folders:
