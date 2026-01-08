@@ -118,26 +118,37 @@ images/
 - `gap.horizontal`, `gap.vertical`（cm or `{value, mode}`）
 - `image.size_mode`: `fit` / `fixed`
 - `image.fit_mode`: `fit` / `width` / `height`
-- `crop.regions`: 複数クロップ領域（px）
+- `crop.regions`: 複数クロップ領域（px / ratio）
 - `crop.rows`, `crop.cols`: 適用セル指定（0-index、`null` は全て）
+- `crop.targets`: 適用セルを明示（例: `[{row:0,col:1}]` / `"0,1"`）。指定時は rows/cols より優先
 - `crop.display.position`: `right` / `bottom`
 - `border.crop`, `border.zoom`
+- `images`: 画像パスを row-major で直接指定（GUIの「画像リスト」モードと対応）
 
 ---
 
 ## クロップ（拡大表示）について
 
-- クロップ領域はピクセル座標（`x, y, width, height`）で定義します（[`core.CropRegion`](core.py)）。
-- 適用セルは [`core.should_apply_crop`](core.py) の条件（`crop.rows/cols`）で決まります。
+- クロップ領域はピクセル座標（`x, y, width, height`）で定義できます（[`core.CropRegion`](core.py)）。
+- 画像サイズがバラバラでも同じ位置を切り出したい場合、`mode: ratio` と `x_ratio/y_ratio/width_ratio/height_ratio` で比率指定できます。
+- 適用セルは [`core.should_apply_crop`](core.py) の条件（`crop.targets` → `crop.rows/cols`）で決まります。
 - 拡大画像の配置計算は [`core.calculate_item_bounds`](core.py) と関連関数群で行っています。
 
-## 改善案
-- サイズの違う画像を並べることに対応する（縦横比が同じでないもの）
-- サイズの違う画像（縦横比は同じ）の一括クロップに対応する（画像数からwidth,heightを自動計算）
-- クロップできる画像を選択できるようにする
-- 画像をフォルダで追加するだけでなく，画像を個別に追加する
-- プレビュー画面で画像を表示する（完全プレビューの機能の実装）
-- プレビュー画面で画像をクリックすることでその画像を編集できるようにする（クロップなどなど）
+---
+
+## 改善案（反映状況）
+
+- [x] サイズの違う画像を並べる（比率違い含む）  
+  → `fit_mode` + レイアウト計算（[`core.calculate_item_bounds`](core.py)）で吸収
+- [x] サイズの違う画像（縦横比は同じ）の一括クロップ  
+  → `crop.regions[].mode: ratio` を追加
+- [x] クロップできる画像を選択できるようにする  
+  → `crop.targets` を追加
+- [x] 画像をフォルダで追加するだけでなく，画像を個別に追加する  
+  → GUI に「画像リスト」入力モードを追加（`images` も保存可能）
+- [ ] プレビュー画面で画像を表示する（完全プレビュー）  
+- [x] プレビュー画面クリックで画像を編集できるようにする（クロップなど）  
+  → セルクリックで CropEditor を開く
 
 ## ライセンス
 

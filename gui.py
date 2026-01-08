@@ -227,6 +227,9 @@ class ImageGridApp:
         # Output settings
         self.output_path = tk.StringVar(value="output.pptx")
 
+        # NEW: input mode (folders vs images)
+        self.input_mode = tk.StringVar(value="folders")  # 'folders' | 'images'
+
         # Grid settings
         self.rows = tk.IntVar(value=3)
         self.cols = tk.IntVar(value=3)
@@ -283,6 +286,7 @@ class ImageGridApp:
 
         # Data
         self.folders = []
+        self.images = []  # NEW: explicit image list
         self.crop_regions = []
         self.crop_rows_filter = tk.StringVar(value="")
         self.crop_cols_filter = tk.StringVar(value="")
@@ -377,19 +381,39 @@ class ImageGridApp:
         )
         ttk.Button(f_out, text="参照", command=self._browse_output).pack(side=tk.RIGHT)
 
-        # Input folders
-        f_folders = ttk.LabelFrame(self.tab_basic, text="入力画像フォルダ", padding=5)
+        # Input mode
+        f_mode = ttk.LabelFrame(self.tab_basic, text="入力モード", padding=5)
+        f_mode.pack(fill=tk.X, pady=5)
+        ttk.Radiobutton(
+            f_mode,
+            text="フォルダ",
+            variable=self.input_mode,
+            value="folders",
+            command=self._refresh_input_listbox,
+        ).pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(
+            f_mode,
+            text="画像リスト（個別追加）",
+            variable=self.input_mode,
+            value="images",
+            command=self._refresh_input_listbox,
+        ).pack(side=tk.LEFT, padx=5)
+
+        # Input folders / images
+        f_folders = ttk.LabelFrame(
+            self.tab_basic, text="入力（フォルダ/画像）", padding=5
+        )
         f_folders.pack(fill=tk.BOTH, expand=True, pady=5)
 
         btn_frame = ttk.Frame(f_folders)
         btn_frame.pack(fill=tk.X, pady=2)
-        ttk.Button(btn_frame, text="追加", command=self._add_folder).pack(
+        ttk.Button(btn_frame, text="追加", command=self._add_input).pack(
             side=tk.LEFT, padx=2
         )
-        ttk.Button(btn_frame, text="削除", command=self._remove_folder).pack(
+        ttk.Button(btn_frame, text="削除", command=self._remove_input).pack(
             side=tk.LEFT, padx=2
         )
-        ttk.Button(btn_frame, text="クリア", command=self._clear_folders).pack(
+        ttk.Button(btn_frame, text="クリア", command=self._clear_inputs).pack(
             side=tk.LEFT, padx=2
         )
 
@@ -823,9 +847,16 @@ class ImageGridApp:
         c.image_width = self._get_safe_double(self.image_w, 10.0)
         c.image_height = self._get_safe_double(self.image_h, 7.5)
 
-        c.folders = (
-            self.folders if self.folders else ["dummy"] * max(1, c.rows * c.cols)
-        )
+        # Inputs
+        if self.input_mode.get() == "images":
+            c.images = self.images[:]
+            c.folders = []
+        else:
+            c.images = None
+            c.folders = (
+                self.folders if self.folders else ["dummy"] * max(1, c.rows * c.cols)
+            )
+
         c.crop_regions = self.crop_regions
         c.output = self.output_path.get()
 
@@ -896,10 +927,17 @@ class ImageGridApp:
         if c.image_height:
             self.image_h.set(c.image_height)
 
-        self.folders = c.folders
-        self.folder_listbox.delete(0, tk.END)
-        for p in self.folders:
-            self.folder_listbox.insert(tk.END, p)
+        # Inputs
+        if c.images:
+            self.input_mode.set("images")
+            self.images = c.images
+            self.folders = []
+        else:
+            self.input_mode.set("folders")
+            self.folders = c.folders
+            self.images = []
+
+        self._refresh_input_listbox()
 
         self.crop_regions = c.crop_regions
         self._update_region_list()
@@ -944,14 +982,42 @@ class ImageGridApp:
         if path:
             self.output_path.set(path)
 
-    def _add_folder(self):
-        p = filedialog.askdirectory()
-        if p:
-            self.folders.append(p)
-            self.folder_listbox.insert(tk.END, p)
-            self._schedule_preview()
+    def _refresh_input_listbox(self):
+        self.folder_listbox.delete(0, tk.END)
+        if self.input_mode.get() == "images":
+            for p in self.images:
+                self.folder_listbox.insert(tk.END, p)
+        else:
+            for p in self.folders:
+                self.folder_listbox.insert(tk.END, p)
+        self._schedule_preview()
 
-            # Auto-detect aspect ratio from first image
+    def _add_input(self):
+        if self.input_mode.get() == "images":
+            paths = filedialog.askopenfilenames(
+                filetypes=[("Images", "*.png;*.jpg;*.jpeg;*.bmp;*.webp;*.tiff;*.gif")]
+            )
+            if not paths:
+                return
+            self.images.extend(list(paths))
+            self._refresh_input_listbox()
+
+            # Auto-detect aspect ratio from first added image
+            try:
+                with Image.open(self.images[0]) as img:
+                    w, h = img.size
+                    self.dummy_ratio_w.set(1.0)
+                    self.dummy_ratio_h.set(h / w)
+            except Exception:
+                pass
+        else:
+            p = filedialog.askdirectory()
+            if not p:
+                return
+            self.folders.append(p)
+            self._refresh_input_listbox()
+
+            # Auto-detect aspect ratio from first image in folder
             try:
                 images = get_sorted_images(p)
                 if images:
@@ -962,25 +1028,37 @@ class ImageGridApp:
             except Exception:
                 pass
 
-    def _remove_folder(self):
-        s = self.folder_listbox.curselection()
-        if s:
-            self.folders.pop(s[0])
-            self.folder_listbox.delete(s[0])
-            self._schedule_preview()
+    def _remove_input(self):
+        sel = list(self.folder_listbox.curselection())
+        if not sel:
+            return
+        for i in reversed(sel):
+            if self.input_mode.get() == "images":
+                if 0 <= i < len(self.images):
+                    self.images.pop(i)
+            else:
+                if 0 <= i < len(self.folders):
+                    self.folders.pop(i)
+        self._refresh_input_listbox()
 
-    def _clear_folders(self):
+    def _clear_inputs(self):
         self.folders = []
-        self.folder_listbox.delete(0, tk.END)
-        self._schedule_preview()
+        self.images = []
+        self._refresh_input_listbox()
 
     def _open_crop_editor(self):
         target_img = None
-        for f in self.folders:
-            imgs = get_sorted_images(f)
-            if imgs:
-                target_img = imgs[0]
-                break
+
+        # NEW: prioritize actual cell images
+        if self.input_mode.get() == "images":
+            if self.images:
+                target_img = self.images[0]
+        else:
+            for f in self.folders:
+                imgs = get_sorted_images(f)
+                if imgs:
+                    target_img = imgs[0]
+                    break
 
         if not target_img:
             target_img = filedialog.askopenfilename(
@@ -990,154 +1068,34 @@ class ImageGridApp:
         if target_img:
             CropEditor(self.root, target_img, self._add_region_from_editor)
 
-    def _add_region_from_editor(self, x, y, w, h, name):
-        r = CropRegion(x, y, w, h, (255, 0, 0), name)
-        self.crop_regions.append(r)
-        self._update_region_list()
-        self._schedule_preview()
+    def _get_image_path_for_cell(self, row: int, col: int) -> Optional[str]:
+        config = self._get_current_config()
+        if config.images:
+            idx = row * config.cols + col
+            if 0 <= idx < len(config.images):
+                return config.images[idx]
+            return None
 
-    def _add_region_dialog(self):
-        d = tk.Toplevel(self.root)
-        d.title("Add Region")
+        folders = config.folders or []
+        if config.arrangement == "row":
+            if row >= len(folders):
+                return None
+            imgs = get_sorted_images(folders[row])
+            return imgs[col] if col < len(imgs) else None
+        else:
+            if col >= len(folders):
+                return None
+            imgs = get_sorted_images(folders[col])
+            return imgs[row] if row < len(imgs) else None
 
-        tk.Label(d, text="Name").grid(row=0, column=0)
-        v_name = tk.Entry(d)
-        v_name.grid(row=0, column=1)
-        v_name.insert(0, f"R{len(self.crop_regions) + 1}")
-
-        entries = {}
-        for i, label in enumerate(["x", "y", "w", "h"], 1):
-            tk.Label(d, text=label).grid(row=i, column=0)
-            e = tk.Entry(d)
-            e.grid(row=i, column=1)
-            entries[label] = e
-
-        c_var = [(255, 0, 0)]
-
-        def pick_color():
-            c = colorchooser.askcolor(color=c_var[0])
-            if c[0]:
-                c_var[0] = tuple(map(int, c[0]))
-                b_col.config(bg=c[1])
-
-        b_col = tk.Button(d, text="Color", bg="#FF0000", fg="white", command=pick_color)
-        b_col.grid(row=5, column=0, columnspan=2)
-
-        def add():
-            try:
-                self.crop_regions.append(
-                    CropRegion(
-                        int(entries["x"].get()),
-                        int(entries["y"].get()),
-                        int(entries["w"].get()),
-                        int(entries["h"].get()),
-                        c_var[0],
-                        v_name.get(),
-                    )
-                )
-                self._update_region_list()
-                self._schedule_preview()
-                d.destroy()
-            except Exception:
-                pass
-
-        tk.Button(d, text="OK", command=add).grid(row=6, column=0, columnspan=2)
-
-    def _remove_region(self):
-        s = self.region_tree.selection()
-        if s:
-            self.crop_regions.pop(self.region_tree.index(s[0]))
-            self._update_region_list()
-            self._schedule_preview()
-
-    def _update_region_list(self):
-        self.region_tree.delete(*self.region_tree.get_children())
-        for r in self.crop_regions:
-            self.region_tree.insert(
-                "",
-                tk.END,
-                values=(r.name, f"{r.x},{r.y},{r.width},{r.height}", r.align),
+    def _on_preview_cell_click(self, row: int, col: int):
+        p = self._get_image_path_for_cell(row, col)
+        if not p:
+            p = filedialog.askopenfilename(
+                filetypes=[("Images", "*.png;*.jpg;*.jpeg;*.bmp;*.webp")]
             )
-
-    def _on_region_select(self, event):
-        sel = self.region_tree.selection()
-        if not sel:
-            return
-        self.sel_idx = self.region_tree.index(sel[0])
-        r = self.crop_regions[self.sel_idx]
-
-        self.r_name.set(r.name)
-        self.r_x.set(r.x)
-        self.r_y.set(r.y)
-        self.r_w.set(r.width)
-        self.r_h.set(r.height)
-        self.r_color = r.color
-        self.btn_r_color.config(bg=f"#{r.color[0]:02x}{r.color[1]:02x}{r.color[2]:02x}")
-        self.r_align.set(r.align)
-        self.r_offset.set(r.offset)
-        self.r_gap.set(str(r.gap) if r.gap is not None else "")
-
-    def _pick_region_color(self):
-        c = colorchooser.askcolor(color=self.r_color)
-        if c[0]:
-            self.r_color = tuple(map(int, c[0]))
-            self.btn_r_color.config(bg=c[1])
-
-    def _update_region_detail(self):
-        if self.sel_idx is None or self.sel_idx >= len(self.crop_regions):
-            return
-        r = self.crop_regions[self.sel_idx]
-
-        r.name = self.r_name.get()
-        r.x = self._get_safe_int(self.r_x)
-        r.y = self._get_safe_int(self.r_y)
-        r.width = self._get_safe_int(self.r_w)
-        r.height = self._get_safe_int(self.r_h)
-        r.color = self.r_color
-        r.align = self.r_align.get()
-        r.offset = self._get_safe_double(self.r_offset)
-
-        g_str = self.r_gap.get().strip()
-        r.gap = float(g_str) if g_str else None
-
-        self._update_region_list()
-        self._schedule_preview()
-
-    def _save_config(self):
-        f = filedialog.asksaveasfilename(
-            defaultextension=".yaml", filetypes=[("YAML", "*.yaml")]
-        )
-        if not f:
-            return
-        try:
-            config = self._get_current_config()
-            save_config(config, f)
-            messagebox.showinfo("Saved", "Config saved.")
-        except Exception as e:
-            messagebox.showerror("Error", str(e))
-
-    def _load_config_gui(self):
-        f = filedialog.askopenfilename(filetypes=[("YAML", "*.yaml")])
-        if not f:
-            return
-        try:
-            config = load_config(f)
-            self._apply_config_to_gui(config)
-        except Exception as e:
-            messagebox.showerror("Error", str(e))
-
-    def _generate(self):
-        try:
-            config = self._get_current_config()
-            config.output = self.output_path.get()
-            create_grid_presentation(config)
-            messagebox.showinfo("OK", "Generated!")
-        except Exception as e:
-            messagebox.showerror("Error", str(e))
-
-    # -------------------------------------------------------------------------
-    # Preview Rendering
-    # -------------------------------------------------------------------------
+        if p:
+            CropEditor(self.root, p, self._add_region_from_editor)
 
     def _update_preview(self):
         """Render the preview canvas."""
@@ -1308,7 +1266,8 @@ class ImageGridApp:
 
                 has_crops = should_apply_crop(r, c, config)
 
-                # Draw main image placeholder
+                # Draw main image placeholder (clickable)
+                tag = f"cell_{r}_{c}"
                 canvas.create_rectangle(
                     tx(main_l),
                     ty(main_t),
@@ -1316,6 +1275,12 @@ class ImageGridApp:
                     ty(main_t + img_h_cm),
                     fill="#ddf",
                     outline="blue",
+                    tags=(tag,),
+                )
+                canvas.tag_bind(
+                    tag,
+                    "<Button-1>",
+                    lambda e, rr=r, cc=c: self._on_preview_cell_click(rr, cc),
                 )
 
                 # Draw crop placeholders

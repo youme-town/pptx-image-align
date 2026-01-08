@@ -34,6 +34,8 @@ from pptx.enum.shapes import MSO_SHAPE
 CM_TO_EMU = 360000
 PT_TO_EMU = 12700
 
+SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp"}
+
 
 # =============================================================================
 # Unit Conversion Functions
@@ -74,6 +76,13 @@ class CropRegion:
     align: str = "auto"  # 'auto', 'start', 'center', 'end'
     offset: float = 0.0  # cm, offset from alignment anchor
     gap: Optional[float] = None  # cm, overrides global main-crop gap if set
+
+    # NEW: ratio-based crop (robust across different image pixel sizes)
+    mode: str = "px"  # 'px' or 'ratio'
+    x_ratio: Optional[float] = None
+    y_ratio: Optional[float] = None
+    width_ratio: Optional[float] = None
+    height_ratio: Optional[float] = None
 
 
 @dataclass
@@ -141,6 +150,8 @@ class GridConfig:
     crop_regions: List[CropRegion] = field(default_factory=list)
     crop_rows: Optional[List[int]] = None
     crop_cols: Optional[List[int]] = None
+    crop_targets: Optional[List[Tuple[int, int]]] = None  # NEW: explicit (row, col)
+
     crop_display: CropDisplayConfig = field(default_factory=CropDisplayConfig)
 
     # Border settings
@@ -153,6 +164,7 @@ class GridConfig:
 
     # Input/Output
     folders: List[str] = field(default_factory=list)
+    images: Optional[List[str]] = None  # NEW: explicit images (row-major)
     output: str = "output.pptx"
 
 
@@ -263,6 +275,7 @@ def load_config(config_path: str) -> GridConfig:
         # Parse crop regions
         if "regions" in crop:
             for i, r in enumerate(crop["regions"]):
+                mode = r.get("mode", "px")
                 region = CropRegion(
                     x=r.get("x", 0),
                     y=r.get("y", 0),
@@ -273,10 +286,16 @@ def load_config(config_path: str) -> GridConfig:
                     align=r.get("align", "auto"),
                     offset=r.get("offset", 0.0),
                     gap=r.get("gap", None),
+                    mode=mode,
+                    x_ratio=r.get("x_ratio"),
+                    y_ratio=r.get("y_ratio"),
+                    width_ratio=r.get("width_ratio"),
+                    height_ratio=r.get("height_ratio"),
                 )
                 config.crop_regions.append(region)
         elif "region" in crop:
             r = crop["region"]
+            mode = r.get("mode", "px")
             region = CropRegion(
                 x=r.get("x", 0),
                 y=r.get("y", 0),
@@ -287,11 +306,28 @@ def load_config(config_path: str) -> GridConfig:
                 align=r.get("align", "auto"),
                 offset=r.get("offset", 0.0),
                 gap=r.get("gap", None),
+                mode=mode,
+                x_ratio=r.get("x_ratio"),
+                y_ratio=r.get("y_ratio"),
+                width_ratio=r.get("width_ratio"),
+                height_ratio=r.get("height_ratio"),
             )
             config.crop_regions.append(region)
 
         config.crop_rows = crop.get("rows")
         config.crop_cols = crop.get("cols")
+
+        # NEW: explicit targets
+        targets = crop.get("targets")
+        if targets is not None:
+            parsed: List[Tuple[int, int]] = []
+            for t in targets:
+                if isinstance(t, str) and "," in t:
+                    rs, cs = t.split(",", 1)
+                    parsed.append((int(rs.strip()), int(cs.strip())))
+                elif isinstance(t, dict) and "row" in t and "col" in t:
+                    parsed.append((int(t["row"]), int(t["col"])))
+            config.crop_targets = parsed if parsed else []
 
         # Crop display settings
         if "display" in crop:
@@ -335,6 +371,7 @@ def load_config(config_path: str) -> GridConfig:
     # Input/Output
     if "folders" in data:
         config.folders = data["folders"]
+    config.images = data.get("images")  # NEW
     config.output = data.get("output", config.output)
 
     return config
@@ -369,6 +406,7 @@ def save_config(config: GridConfig, output_path: str) -> None:
             "height": config.image_height,
         },
         "folders": config.folders,
+        "images": config.images,  # NEW
         "output": config.output,
         "border": {
             "crop": {
@@ -394,11 +432,22 @@ def save_config(config: GridConfig, output_path: str) -> None:
                     "align": r.align,
                     "offset": r.offset,
                     "gap": r.gap,
+                    # NEW (ratio crop)
+                    "mode": r.mode,
+                    "x_ratio": r.x_ratio,
+                    "y_ratio": r.y_ratio,
+                    "width_ratio": r.width_ratio,
+                    "height_ratio": r.height_ratio,
                 }
                 for r in config.crop_regions
             ],
             "rows": config.crop_rows,
             "cols": config.crop_cols,
+            "targets": (
+                [{"row": r, "col": c} for (r, c) in config.crop_targets]
+                if config.crop_targets is not None
+                else None
+            ),
             "display": {
                 "position": config.crop_display.position,
                 "size": config.crop_display.size,
@@ -435,24 +484,61 @@ def extract_number_from_filename(filename: str) -> int:
 
 def get_sorted_images(folder_path: str) -> List[str]:
     """Get sorted list of image files from a folder."""
-    supported_extensions = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp"}
-    folder = Path(folder_path)
-    if not folder.exists():
+    p = Path(folder_path)
+    if not p.exists():
         return []
+
+    # NEW: allow a single image path
+    if p.is_file():
+        return [str(p)] if p.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS else []
 
     image_files = [
         f
-        for f in folder.iterdir()
-        if f.is_file() and f.suffix.lower() in supported_extensions
+        for f in p.iterdir()
+        if f.is_file() and f.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
     ]
     image_files.sort(key=lambda f: extract_number_from_filename(f.stem))
     return [str(f) for f in image_files]
 
 
+def _clamp_int(v: int, lo: int, hi: int) -> int:
+    return max(lo, min(hi, v))
+
+
+def resolve_crop_box(
+    region: CropRegion, img_w_px: int, img_h_px: int
+) -> Tuple[int, int, int, int]:
+    """
+    Resolve CropRegion to pixel box (x, y, w, h).
+    Supports region.mode == 'ratio'.
+    """
+    if region.mode == "ratio":
+        xr = 0.0 if region.x_ratio is None else float(region.x_ratio)
+        yr = 0.0 if region.y_ratio is None else float(region.y_ratio)
+        wr = 0.0 if region.width_ratio is None else float(region.width_ratio)
+        hr = 0.0 if region.height_ratio is None else float(region.height_ratio)
+
+        x = int(round(xr * img_w_px))
+        y = int(round(yr * img_h_px))
+        w = int(round(wr * img_w_px))
+        h = int(round(hr * img_h_px))
+    else:
+        x, y, w, h = region.x, region.y, region.width, region.height
+
+    # clamp
+    x = _clamp_int(x, 0, max(0, img_w_px))
+    y = _clamp_int(y, 0, max(0, img_h_px))
+    w = _clamp_int(w, 0, max(0, img_w_px - x))
+    h = _clamp_int(h, 0, max(0, img_h_px - y))
+    return x, y, w, h
+
+
 def crop_image(image_path: str, region: CropRegion, output_path: str) -> str:
     """Crop an image according to a CropRegion and save to output_path."""
     with Image.open(image_path) as img:
-        box = (region.x, region.y, region.x + region.width, region.y + region.height)
+        img_w, img_h = img.size
+        x, y, w, h = resolve_crop_box(region, img_w, img_h)
+        box = (x, y, x + w, y + h)
         cropped = img.crop(box)
         cropped.save(output_path)
     return output_path
@@ -473,6 +559,11 @@ def should_apply_crop(row: int, col: int, config: GridConfig) -> bool:
     """Determine if crop regions should be applied to a specific cell."""
     if not config.crop_regions:
         return False
+
+    # NEW: explicit targets take priority
+    if config.crop_targets is not None:
+        return (row, col) in set(config.crop_targets)
+
     if config.crop_rows is not None and row not in config.crop_rows:
         return False
     if config.crop_cols is not None and col not in config.crop_cols:
@@ -945,10 +1036,11 @@ def add_crop_borders_to_image(
     scale_y = image_height / orig_height_px
 
     for region in crop_regions:
-        border_left = image_left + region.x * scale_x
-        border_top = image_top + region.y * scale_y
-        border_w = region.width * scale_x
-        border_h = region.height * scale_y
+        x, y, w, h = resolve_crop_box(region, orig_width_px, orig_height_px)
+        border_left = image_left + x * scale_x
+        border_top = image_top + y * scale_y
+        border_w = w * scale_x
+        border_h = h * scale_y
         add_border_shape(
             slide,
             border_left,
@@ -969,23 +1061,16 @@ def create_grid_presentation(config: GridConfig) -> str:
     blank_layout = prs.slide_layouts[6]
     slide = prs.slides.add_slide(blank_layout)
 
-    # Build image grid
-    if config.arrangement == "row":
-        image_grid = [get_sorted_images(folder) for folder in config.folders]
-    else:
-        columns = [get_sorted_images(folder) for folder in config.folders]
-        max_len = max(len(col) for col in columns) if columns else 0
-        image_grid = [
-            [col[i] if i < len(col) else None for col in columns]
-            for i in range(max_len)
-        ]
+    # NEW: unified grid builder (rows x cols)
+    image_grid = build_image_grid(config)
 
     temp_dir = tempfile.mkdtemp()
     num_crops = len(config.crop_regions)
     metrics = calculate_grid_metrics(config)
 
+    # FIX: use zoom_border_width (not crop_border_width)
     border_offset_cm = (
-        pt_to_cm(config.crop_border_width) if config.show_zoom_border else 0.0
+        pt_to_cm(config.zoom_border_width) if config.show_zoom_border else 0.0
     )
     half_border = border_offset_cm / 2.0 if config.show_zoom_border else 0.0
 
@@ -1011,10 +1096,7 @@ def create_grid_presentation(config: GridConfig) -> str:
             elif config.flow_vertical_align == "bottom":
                 current_y = (config.margin_top + avail_h) - total_content_height
 
-        for row_idx, row_images in enumerate(image_grid):
-            if row_idx >= config.rows:
-                break
-
+        for row_idx in range(config.rows):
             # Determine row height
             if config.layout_mode == "flow":
                 current_row_height = (
@@ -1037,8 +1119,9 @@ def create_grid_presentation(config: GridConfig) -> str:
                 row_total_content_width = 0.0
                 valid_items = 0
 
-                for col_idx, image_path in enumerate(row_images):
-                    if col_idx >= config.cols or image_path is None:
+                for col_idx in range(config.cols):
+                    image_path = image_grid[row_idx][col_idx]
+                    if image_path is None:
                         continue
                     min_x, min_y, max_x, max_y = calculate_item_bounds(
                         config, metrics, image_path, row_idx, col_idx, border_offset_cm
@@ -1060,10 +1143,8 @@ def create_grid_presentation(config: GridConfig) -> str:
                     current_x = config.margin_left + (avail_w - row_total_content_width)
 
             # Process each cell
-            for col_idx, image_path in enumerate(row_images):
-                if col_idx >= config.cols:
-                    break
-
+            for col_idx in range(config.cols):
+                image_path = image_grid[row_idx][col_idx]
                 this_gap_h = config.gap_h.to_cm(metrics.main_width)
 
                 if image_path is None:
