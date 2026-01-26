@@ -118,22 +118,37 @@ class UndoRedoManager:
 class CropEditor(tk.Toplevel):
     """Window for visually selecting crop regions on an image."""
 
-    def __init__(self, parent, image_path: str, callback):
+    def __init__(self, parent, image_path: str, callback, existing_regions=None):
         super().__init__(parent)
         self.title("Crop Editor")
-        self.geometry("900x700")
+        self.geometry("1100x700")
         self.callback = callback
+        self.existing_regions = existing_regions or []
 
         self.image_path = image_path
         self.orig_img = Image.open(image_path)
         self.orig_w, self.orig_h = self.orig_img.size
 
-        # UI Components
-        self.canvas_frame = ttk.Frame(self)
-        self.canvas_frame.pack(fill=tk.BOTH, expand=True)
+        # UI Components - Main container with left (image) and right (preview)
+        self.main_frame = ttk.Frame(self)
+        self.main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Left: Image canvas
+        self.canvas_frame = ttk.Frame(self.main_frame)
+        self.canvas_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         self.canvas = tk.Canvas(self.canvas_frame, bg="gray")
         self.canvas.pack(fill=tk.BOTH, expand=True)
+
+        # Right: Preview panel
+        self.preview_frame = ttk.LabelFrame(self.main_frame, text="クロップ領域プレビュー", padding=5)
+        self.preview_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=5, pady=5)
+
+        self.preview_canvas = tk.Canvas(self.preview_frame, bg="white", width=200, height=200)
+        self.preview_canvas.pack(fill=tk.BOTH, expand=True)
+
+        self.preview_label = ttk.Label(self.preview_frame, text="領域を選択してください", wraplength=190)
+        self.preview_label.pack(pady=5)
 
         self.bottom_frame = ttk.Frame(self, padding=5)
         self.bottom_frame.pack(fill=tk.X)
@@ -150,6 +165,9 @@ class CropEditor(tk.Toplevel):
         ttk.Button(self.bottom_frame, text="キャンセル", command=self.destroy).pack(
             side=tk.RIGHT
         )
+
+        # Preview image reference
+        self.preview_tk_img = None
 
         # State
         self.rect_id = None
@@ -198,7 +216,41 @@ class CropEditor(tk.Toplevel):
             self.off_x, self.off_y, anchor=tk.NW, image=self.tk_img
         )
 
-        # Redraw existing rect if present
+        # Draw existing crop regions (from the region list)
+        for region in self.existing_regions:
+            # Calculate region position based on mode
+            if region.mode == "ratio":
+                rx = (region.x_ratio or 0) * self.orig_w
+                ry = (region.y_ratio or 0) * self.orig_h
+                rw = (region.width_ratio or 0) * self.orig_w
+                rh = (region.height_ratio or 0) * self.orig_h
+            else:
+                # px mode - use x, y, width, height as ratio of 1000
+                rx = (region.x / 1000.0) * self.orig_w
+                ry = (region.y / 1000.0) * self.orig_h
+                rw = (region.width / 1000.0) * self.orig_w
+                rh = (region.height / 1000.0) * self.orig_h
+
+            # Convert to display coordinates
+            sx = rx * self.display_scale + self.off_x
+            sy = ry * self.display_scale + self.off_y
+            ex = (rx + rw) * self.display_scale + self.off_x
+            ey = (ry + rh) * self.display_scale + self.off_y
+
+            # Draw with region color
+            color = "#%02x%02x%02x" % region.color
+            self.canvas.create_rectangle(sx, sy, ex, ey, outline=color, width=1)
+
+            # Draw region name
+            if region.name:
+                self.canvas.create_text(
+                    (sx + ex) / 2, (sy + ey) / 2,
+                    text=region.name,
+                    fill=color,
+                    font=("Arial", 9, "bold")
+                )
+
+        # Redraw current selection rect if present
         if self.cur_rect:
             x, y, w, h = self.cur_rect
             sx = x * self.display_scale + self.off_x
@@ -226,6 +278,24 @@ class CropEditor(tk.Toplevel):
     def on_drag(self, event):
         self.canvas.coords(self.rect_id, self.start_x, self.start_y, event.x, event.y)
 
+        # リアルタイムでプレビューを更新（負荷軽減のため一時的な矩形を計算）
+        x1 = min(self.start_x, event.x) - self.off_x
+        y1 = min(self.start_y, event.y) - self.off_y
+        x2 = max(self.start_x, event.x) - self.off_x
+        y2 = max(self.start_y, event.y) - self.off_y
+
+        ox1 = max(0, int(x1 / self.display_scale))
+        oy1 = max(0, int(y1 / self.display_scale))
+        ox2 = min(self.orig_w, int(x2 / self.display_scale))
+        oy2 = min(self.orig_h, int(y2 / self.display_scale))
+
+        w = ox2 - ox1
+        h = oy2 - oy1
+
+        if w > 5 and h > 5:
+            self.cur_rect = (ox1, oy1, w, h)
+            self._update_crop_preview()
+
     def on_release(self, event):
         end_x, end_y = event.x, event.y
 
@@ -246,6 +316,45 @@ class CropEditor(tk.Toplevel):
 
         if w > 0 and h > 0:
             self.cur_rect = (ox1, oy1, w, h)
+            self._update_crop_preview()
+
+    def _update_crop_preview(self):
+        """選択したクロップ領域のプレビューを更新"""
+        if not self.cur_rect:
+            return
+
+        x, y, w, h = self.cur_rect
+
+        # クロップ領域を切り出し
+        cropped = self.orig_img.crop((x, y, x + w, y + h))
+
+        # プレビューキャンバスのサイズに合わせてリサイズ
+        preview_w = self.preview_canvas.winfo_width()
+        preview_h = self.preview_canvas.winfo_height()
+
+        if preview_w < 10 or preview_h < 10:
+            preview_w, preview_h = 200, 200
+
+        # アスペクト比を維持してリサイズ
+        scale = min(preview_w / w, preview_h / h) * 0.95
+        new_w = max(1, int(w * scale))
+        new_h = max(1, int(h * scale))
+
+        resized = cropped.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        self.preview_tk_img = ImageTk.PhotoImage(resized)
+
+        # プレビューを描画
+        self.preview_canvas.delete("all")
+        cx = preview_w // 2
+        cy = preview_h // 2
+        self.preview_canvas.create_image(cx, cy, anchor=tk.CENTER, image=self.preview_tk_img)
+
+        # 情報ラベルを更新
+        self.preview_label.config(
+            text=f"サイズ: {w} x {h} px\n"
+                 f"位置: ({x}, {y})\n"
+                 f"比率: {w/self.orig_w:.1%} x {h/self.orig_h:.1%}"
+        )
 
     def on_save(self):
         if self.cur_rect:
@@ -1517,7 +1626,7 @@ class ImageGridApp:
             )
 
         if target_img:
-            CropEditor(self.root, target_img, self._add_region_from_editor)
+            CropEditor(self.root, target_img, self._add_region_from_editor, self.crop_regions)
 
     def _get_image_path_for_cell(self, row: int, col: int) -> Optional[str]:
         config = self._get_current_config()
@@ -1546,7 +1655,7 @@ class ImageGridApp:
                 filetypes=[("Images", "*.png;*.jpg;*.jpeg;*.bmp;*.webp")]
             )
         if p:
-            CropEditor(self.root, p, self._add_region_from_editor)
+            CropEditor(self.root, p, self._add_region_from_editor, self.crop_regions)
 
     def _add_region_from_editor(self, x: int, y: int, w: int, h: int, name: str):
         """CropEditorからのコールバック - 新しいクロップ領域を追加"""
