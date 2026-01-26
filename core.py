@@ -16,15 +16,17 @@ import re
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict
 from dataclasses import dataclass, field
 
 import yaml
 from PIL import Image
 from pptx import Presentation
-from pptx.util import Emu
+from pptx.util import Emu, Pt
 from pptx.dml.color import RGBColor
-from pptx.enum.shapes import MSO_SHAPE
+from pptx.enum.shapes import MSO_SHAPE, MSO_CONNECTOR
+from pptx.enum.text import PP_ALIGN
+from pptx.enum.dml import MSO_LINE_DASH_STYLE
 
 
 # =============================================================================
@@ -112,6 +114,52 @@ class CropDisplayConfig:
 
 
 @dataclass
+class CropOverride:
+    """Per-cell crop override (row, col) -> regions. If regions is empty, crop is disabled for that cell."""
+
+    row: int
+    col: int
+    regions: List[CropRegion] = field(default_factory=list)
+
+
+@dataclass
+class CropPreset:
+    """クロッププリセット"""
+
+    name: str
+    regions: List[CropRegion] = field(default_factory=list)
+    description: str = ""
+    display_position: str = "right"  # 'right' or 'bottom'
+
+
+@dataclass
+class LabelConfig:
+    """テキストラベル/キャプションの設定"""
+
+    enabled: bool = False
+    mode: str = "filename"  # 'filename', 'number', 'custom'
+    position: str = "bottom"  # 'top', 'bottom'
+    font_name: str = "Arial"
+    font_size: float = 10.0  # pt
+    font_color: Tuple[int, int, int] = (0, 0, 0)
+    font_bold: bool = False
+    number_format: str = "({n})"  # 連番フォーマット
+    custom_texts: List[str] = field(default_factory=list)  # カスタムモード用
+    gap: float = 0.1  # cm - ラベルと画像の間隔
+
+
+@dataclass
+class ConnectorConfig:
+    """クロップ領域と拡大画像を結ぶ連結線の設定"""
+
+    show: bool = False
+    width: float = 1.0  # pt
+    color: Optional[Tuple[int, int, int]] = None  # Noneならクロップ領域の色を使用
+    style: str = "straight"  # 'straight' or 'elbow'
+    dash_style: str = "solid"  # 'solid', 'dash', 'dot'
+
+
+@dataclass
 class GridConfig:
     """Main configuration for grid-based image layout."""
 
@@ -152,6 +200,9 @@ class GridConfig:
     crop_cols: Optional[List[int]] = None
     crop_targets: Optional[List[Tuple[int, int]]] = None  # NEW: explicit (row, col)
 
+    # NEW: per-cell overrides
+    crop_overrides: List[CropOverride] = field(default_factory=list)
+
     crop_display: CropDisplayConfig = field(default_factory=CropDisplayConfig)
 
     # Border settings
@@ -166,6 +217,16 @@ class GridConfig:
     folders: List[str] = field(default_factory=list)
     images: Optional[List[str]] = None  # NEW: explicit images (row-major)
     output: str = "output.pptx"
+
+    # Label settings
+    label_config: LabelConfig = field(default_factory=LabelConfig)
+
+    # Template settings
+    template_path: Optional[str] = None
+    slide_layout_index: int = 6  # Default to blank layout
+
+    # Connector settings
+    connector: ConnectorConfig = field(default_factory=ConnectorConfig)
 
 
 @dataclass
@@ -208,6 +269,26 @@ def parse_gap(data) -> GapConfig:
     elif isinstance(data, dict):
         return GapConfig(float(data.get("value", 0.5)), data.get("mode", "cm"))
     return GapConfig(0.5, "cm")
+
+
+def _parse_crop_region_dict(r: dict, fallback_name: str) -> CropRegion:
+    mode = r.get("mode", "px")
+    return CropRegion(
+        x=r.get("x", 0),
+        y=r.get("y", 0),
+        width=r.get("width", 100),
+        height=r.get("height", 100),
+        color=parse_color(r.get("color", "#FF0000")),
+        name=r.get("name", fallback_name),
+        align=r.get("align", "auto"),
+        offset=r.get("offset", 0.0),
+        gap=r.get("gap", None),
+        mode=mode,
+        x_ratio=r.get("x_ratio"),
+        y_ratio=r.get("y_ratio"),
+        width_ratio=r.get("width_ratio"),
+        height_ratio=r.get("height_ratio"),
+    )
 
 
 def load_config(config_path: str) -> GridConfig:
@@ -272,47 +353,13 @@ def load_config(config_path: str) -> GridConfig:
     if "crop" in data:
         crop = data["crop"]
 
-        # Parse crop regions
+        # Parse crop regions (global)
         if "regions" in crop:
             for i, r in enumerate(crop["regions"]):
-                mode = r.get("mode", "px")
-                region = CropRegion(
-                    x=r.get("x", 0),
-                    y=r.get("y", 0),
-                    width=r.get("width", 100),
-                    height=r.get("height", 100),
-                    color=parse_color(r.get("color", "#FF0000")),
-                    name=r.get("name", f"crop_{i + 1}"),
-                    align=r.get("align", "auto"),
-                    offset=r.get("offset", 0.0),
-                    gap=r.get("gap", None),
-                    mode=mode,
-                    x_ratio=r.get("x_ratio"),
-                    y_ratio=r.get("y_ratio"),
-                    width_ratio=r.get("width_ratio"),
-                    height_ratio=r.get("height_ratio"),
-                )
-                config.crop_regions.append(region)
+                config.crop_regions.append(_parse_crop_region_dict(r, f"crop_{i + 1}"))
         elif "region" in crop:
             r = crop["region"]
-            mode = r.get("mode", "px")
-            region = CropRegion(
-                x=r.get("x", 0),
-                y=r.get("y", 0),
-                width=r.get("width", 100),
-                height=r.get("height", 100),
-                color=parse_color(r.get("color", "#FF0000")),
-                name="crop_1",
-                align=r.get("align", "auto"),
-                offset=r.get("offset", 0.0),
-                gap=r.get("gap", None),
-                mode=mode,
-                x_ratio=r.get("x_ratio"),
-                y_ratio=r.get("y_ratio"),
-                width_ratio=r.get("width_ratio"),
-                height_ratio=r.get("height_ratio"),
-            )
-            config.crop_regions.append(region)
+            config.crop_regions.append(_parse_crop_region_dict(r, "crop_1"))
 
         config.crop_rows = crop.get("rows")
         config.crop_cols = crop.get("cols")
@@ -328,6 +375,29 @@ def load_config(config_path: str) -> GridConfig:
                 elif isinstance(t, dict) and "row" in t and "col" in t:
                     parsed.append((int(t["row"]), int(t["col"])))
             config.crop_targets = parsed if parsed else []
+
+        # NEW: per-cell overrides
+        overrides = crop.get("overrides")
+        if isinstance(overrides, list):
+            parsed_overrides: List[CropOverride] = []
+            for o in overrides:
+                if not isinstance(o, dict):
+                    continue
+                if "row" not in o or "col" not in o:
+                    continue
+                regions_data = o.get("regions") or []
+                regions: List[CropRegion] = []
+                for i, rr in enumerate(regions_data):
+                    if isinstance(rr, dict):
+                        regions.append(
+                            _parse_crop_region_dict(
+                                rr, f"cell_{int(o['row'])}_{int(o['col'])}_{i + 1}"
+                            )
+                        )
+                parsed_overrides.append(
+                    CropOverride(row=int(o["row"]), col=int(o["col"]), regions=regions)
+                )
+            config.crop_overrides = parsed_overrides
 
         # Crop display settings
         if "display" in crop:
@@ -374,6 +444,37 @@ def load_config(config_path: str) -> GridConfig:
     config.images = data.get("images")  # NEW
     config.output = data.get("output", config.output)
 
+    # Label settings
+    if "label" in data:
+        lbl = data["label"]
+        config.label_config.enabled = lbl.get("enabled", False)
+        config.label_config.mode = lbl.get("mode", "filename")
+        config.label_config.position = lbl.get("position", "bottom")
+        config.label_config.font_name = lbl.get("font_name", "Arial")
+        config.label_config.font_size = lbl.get("font_size", 10.0)
+        if "font_color" in lbl:
+            config.label_config.font_color = parse_color(lbl["font_color"])
+        config.label_config.font_bold = lbl.get("font_bold", False)
+        config.label_config.number_format = lbl.get("number_format", "({n})")
+        config.label_config.custom_texts = lbl.get("custom_texts", [])
+        config.label_config.gap = lbl.get("gap", 0.1)
+
+    # Template settings
+    if "template" in data:
+        tpl = data["template"]
+        config.template_path = tpl.get("path")
+        config.slide_layout_index = tpl.get("layout_index", 6)
+
+    # Connector settings
+    if "connector" in data:
+        conn = data["connector"]
+        config.connector.show = conn.get("show", False)
+        config.connector.width = conn.get("width", 1.0)
+        if "color" in conn and conn["color"]:
+            config.connector.color = parse_color(conn["color"])
+        config.connector.style = conn.get("style", "straight")
+        config.connector.dash_style = conn.get("dash_style", "solid")
+
     return config
 
 
@@ -408,6 +509,29 @@ def save_config(config: GridConfig, output_path: str) -> None:
         "folders": config.folders,
         "images": config.images,  # NEW
         "output": config.output,
+        "label": {
+            "enabled": config.label_config.enabled,
+            "mode": config.label_config.mode,
+            "position": config.label_config.position,
+            "font_name": config.label_config.font_name,
+            "font_size": config.label_config.font_size,
+            "font_color": list(config.label_config.font_color),
+            "font_bold": config.label_config.font_bold,
+            "number_format": config.label_config.number_format,
+            "custom_texts": config.label_config.custom_texts,
+            "gap": config.label_config.gap,
+        },
+        "template": {
+            "path": config.template_path,
+            "layout_index": config.slide_layout_index,
+        },
+        "connector": {
+            "show": config.connector.show,
+            "width": config.connector.width,
+            "color": list(config.connector.color) if config.connector.color else None,
+            "style": config.connector.style,
+            "dash_style": config.connector.dash_style,
+        },
         "border": {
             "crop": {
                 "show": config.show_crop_border,
@@ -432,7 +556,6 @@ def save_config(config: GridConfig, output_path: str) -> None:
                     "align": r.align,
                     "offset": r.offset,
                     "gap": r.gap,
-                    # NEW (ratio crop)
                     "mode": r.mode,
                     "x_ratio": r.x_ratio,
                     "y_ratio": r.y_ratio,
@@ -448,6 +571,33 @@ def save_config(config: GridConfig, output_path: str) -> None:
                 if config.crop_targets is not None
                 else None
             ),
+            # NEW
+            "overrides": [
+                {
+                    "row": o.row,
+                    "col": o.col,
+                    "regions": [
+                        {
+                            "name": r.name,
+                            "x": r.x,
+                            "y": r.y,
+                            "width": r.width,
+                            "height": r.height,
+                            "color": list(r.color),
+                            "align": r.align,
+                            "offset": r.offset,
+                            "gap": r.gap,
+                            "mode": r.mode,
+                            "x_ratio": r.x_ratio,
+                            "y_ratio": r.y_ratio,
+                            "width_ratio": r.width_ratio,
+                            "height_ratio": r.height_ratio,
+                        }
+                        for r in (o.regions or [])
+                    ],
+                }
+                for o in (config.crop_overrides or [])
+            ],
             "display": {
                 "position": config.crop_display.position,
                 "size": config.crop_display.size,
@@ -499,6 +649,45 @@ def get_sorted_images(folder_path: str) -> List[str]:
     ]
     image_files.sort(key=lambda f: extract_number_from_filename(f.stem))
     return [str(f) for f in image_files]
+
+
+def build_image_grid(config: GridConfig) -> List[List[Optional[str]]]:
+    """
+    Build a unified rows x cols image grid.
+    Priority:
+      1) config.images (row-major)
+      2) config.folders interpreted by config.arrangement ('row' or 'col')
+    Missing cells are None.
+    """
+    rows = max(1, int(config.rows))
+    cols = max(1, int(config.cols))
+    grid: List[List[Optional[str]]] = [[None for _ in range(cols)] for _ in range(rows)]
+
+    # 1) Explicit images (row-major)
+    if config.images:
+        for idx, p in enumerate(config.images):
+            r = idx // cols
+            c = idx % cols
+            if 0 <= r < rows and 0 <= c < cols:
+                grid[r][c] = p
+        return grid
+
+    # 2) Folders (row/col)
+    folders = config.folders or []
+    if config.arrangement == "col":
+        # folders[col] -> images down rows
+        for c in range(min(cols, len(folders))):
+            imgs = get_sorted_images(folders[c])
+            for r in range(min(rows, len(imgs))):
+                grid[r][c] = imgs[r]
+    else:
+        # folders[row] -> images across cols
+        for r in range(min(rows, len(folders))):
+            imgs = get_sorted_images(folders[r])
+            for c in range(min(cols, len(imgs))):
+                grid[r][c] = imgs[c]
+
+    return grid
 
 
 def _clamp_int(v: int, lo: int, hi: int) -> int:
@@ -555,12 +744,27 @@ def get_image_dimensions(image_path: str) -> Tuple[int, int]:
 # =============================================================================
 
 
+def get_crop_regions_for_cell(
+    row: int, col: int, config: GridConfig
+) -> List[CropRegion]:
+    """Return crop regions for a specific cell. Per-cell override (if present) takes priority."""
+    for o in config.crop_overrides or []:
+        if o.row == row and o.col == col:
+            return o.regions or []
+    return config.crop_regions or []
+
+
 def should_apply_crop(row: int, col: int, config: GridConfig) -> bool:
     """Determine if crop regions should be applied to a specific cell."""
+    # Per-cell override takes absolute priority (including disabling by empty list)
+    for o in config.crop_overrides or []:
+        if o.row == row and o.col == col:
+            return bool(o.regions)
+
     if not config.crop_regions:
         return False
 
-    # NEW: explicit targets take priority
+    # explicit targets take priority
     if config.crop_targets is not None:
         return (row, col) in set(config.crop_targets)
 
@@ -627,23 +831,17 @@ def calculate_grid_metrics(config: GridConfig) -> LayoutMetrics:
     avail_w_for_cells = total_grid_w - (gap_h_val * (config.cols - 1))
     avail_h_for_cells = total_grid_h - (gap_v_val * (config.rows - 1))
 
-    # Determine which cells have crops
-    has_crops = len(config.crop_regions) > 0
-    expanded_cols = set()
-    expanded_rows = set()
-    if has_crops:
-        expanded_cols = (
-            set(range(config.cols))
-            if config.crop_cols is None
-            else set(config.crop_cols)
-        )
-        expanded_rows = (
-            set(range(config.rows))
-            if config.crop_rows is None
-            else set(config.crop_rows)
-        )
-    num_exp_cols = len([c for c in range(config.cols) if c in expanded_cols])
-    num_exp_rows = len([r for r in range(config.rows) if r in expanded_rows])
+    # Determine which cells have crops (global or per-cell)
+    expanded_cols: set[int] = set()
+    expanded_rows: set[int] = set()
+    for r in range(max(1, config.rows)):
+        for c in range(max(1, config.cols)):
+            if should_apply_crop(r, c, config):
+                expanded_cols.add(c)
+                expanded_rows.add(r)
+
+    num_exp_cols = len(expanded_cols)
+    num_exp_rows = len(expanded_rows)
 
     disp = config.crop_display
     gap_mc = disp.main_crop_gap.to_cm(est_main_w)
@@ -740,7 +938,8 @@ def calculate_item_bounds(
     Calculate bounding box of an item (main image + crops) relative to main image top-left (0,0).
     Returns (min_x, min_y, max_x, max_y).
     """
-    has_crops = should_apply_crop(row_idx, col_idx, config)
+    crop_regions = get_crop_regions_for_cell(row_idx, col_idx, config)
+    has_crops = bool(crop_regions) and should_apply_crop(row_idx, col_idx, config)
 
     if override_size:
         orig_w, orig_h = override_size
@@ -755,8 +954,8 @@ def calculate_item_bounds(
     max_x, max_y = orig_w, orig_h
     half_border = border_offset_cm / 2.0 if config.show_zoom_border else 0.0
 
-    if has_crops and config.crop_regions:
-        num_crops = len(config.crop_regions)
+    if has_crops and crop_regions:
+        num_crops = len(crop_regions)
         disp = config.crop_display
         actual_gap_mc = disp.main_crop_gap.to_cm(
             orig_w if disp.position == "right" else orig_h
@@ -772,8 +971,7 @@ def calculate_item_bounds(
             actual_gap_mc += border_offset_cm
             actual_gap_cc += border_offset_cm
 
-        for crop_idx, region in enumerate(config.crop_regions):
-            # Calculate crop size
+        for crop_idx, region in enumerate(crop_regions):
             cw, ch = _calculate_crop_size(
                 config,
                 metrics,
@@ -786,7 +984,6 @@ def calculate_item_bounds(
                 override_size,
             )
 
-            # Calculate position
             this_gap_mc = region.gap if region.gap is not None else actual_gap_mc
             if region.gap is not None and config.show_zoom_border:
                 this_gap_mc += border_offset_cm
@@ -803,7 +1000,7 @@ def calculate_item_bounds(
                     half_border,
                     disp,
                 )
-            else:  # bottom
+            else:
                 c_top = orig_h + this_gap_mc
                 c_left = _calculate_crop_horizontal_position(
                     region,
@@ -816,7 +1013,6 @@ def calculate_item_bounds(
                     disp,
                 )
 
-            # Update bounds
             min_x = min(min_x, c_left)
             min_y = min(min_y, c_top)
             max_x = max(max_x, c_left + cw)
@@ -908,15 +1104,20 @@ def _calculate_crop_vertical_position(
     elif region.align == "end":
         return orig_h - ch + region.offset - half_border
     else:  # auto
-        if disp.scale is not None or disp.size is not None:
-            return crop_idx * (ch + actual_gap_cc)
+        # 最初と最後のクロップは端に揃える（pin ends）
+        if crop_idx == 0:
+            return 0.0
+        elif num_crops > 1 and crop_idx == num_crops - 1:
+            return orig_h - ch
         else:
-            # Fit logic (pin ends)
-            if crop_idx == 0:
-                return 0.0
-            elif num_crops > 1 and crop_idx == num_crops - 1:
-                return orig_h - ch
+            # 中間のクロップは均等配置
+            if disp.scale is not None or disp.size is not None:
+                # scale/size指定時: 等間隔で配置
+                total_crop_h = num_crops * ch + (num_crops - 1) * actual_gap_cc
+                start_y = (orig_h - total_crop_h) / 2
+                return start_y + crop_idx * (ch + actual_gap_cc)
             else:
+                # fit時: スロットの中央に配置
                 single_h = (orig_h - actual_gap_cc * (num_crops - 1)) / num_crops
                 slot_top = crop_idx * (single_h + actual_gap_cc)
                 return slot_top + (single_h - ch) / 2
@@ -940,14 +1141,20 @@ def _calculate_crop_horizontal_position(
     elif region.align == "end":
         return orig_w - cw + region.offset - half_border
     else:  # auto
-        if disp.scale is not None or disp.size is not None:
-            return crop_idx * (cw + actual_gap_cc)
+        # 最初と最後のクロップは端に揃える（pin ends）
+        if crop_idx == 0:
+            return 0.0
+        elif num_crops > 1 and crop_idx == num_crops - 1:
+            return orig_w - cw
         else:
-            if crop_idx == 0:
-                return 0.0
-            elif num_crops > 1 and crop_idx == num_crops - 1:
-                return orig_w - cw
+            # 中間のクロップは均等配置
+            if disp.scale is not None or disp.size is not None:
+                # scale/size指定時: 等間隔で配置
+                total_crop_w = num_crops * cw + (num_crops - 1) * actual_gap_cc
+                start_x = (orig_w - total_crop_w) / 2
+                return start_x + crop_idx * (cw + actual_gap_cc)
             else:
+                # fit時: スロットの中央に配置
                 sw = (orig_w - actual_gap_cc * (num_crops - 1)) / num_crops
                 slot_left = crop_idx * (sw + actual_gap_cc)
                 return slot_left + (sw - cw) / 2
@@ -1055,20 +1262,25 @@ def add_crop_borders_to_image(
 
 def create_grid_presentation(config: GridConfig) -> str:
     """Create a PowerPoint presentation with images arranged in a grid layout."""
-    prs = Presentation()
-    prs.slide_width = cm_to_emu(config.slide_width)
-    prs.slide_height = cm_to_emu(config.slide_height)
-    blank_layout = prs.slide_layouts[6]
-    slide = prs.slides.add_slide(blank_layout)
+    # Use template if specified, otherwise create new presentation
+    if config.template_path and Path(config.template_path).exists():
+        prs = Presentation(config.template_path)
+    else:
+        prs = Presentation()
+        prs.slide_width = cm_to_emu(config.slide_width)
+        prs.slide_height = cm_to_emu(config.slide_height)
+
+    # Get slide layout
+    layout_index = min(config.slide_layout_index, len(prs.slide_layouts) - 1)
+    slide_layout = prs.slide_layouts[layout_index]
+    slide = prs.slides.add_slide(slide_layout)
 
     # NEW: unified grid builder (rows x cols)
     image_grid = build_image_grid(config)
 
     temp_dir = tempfile.mkdtemp()
-    num_crops = len(config.crop_regions)
     metrics = calculate_grid_metrics(config)
 
-    # FIX: use zoom_border_width (not crop_border_width)
     border_offset_cm = (
         pt_to_cm(config.zoom_border_width) if config.show_zoom_border else 0.0
     )
@@ -1157,7 +1369,11 @@ def create_grid_presentation(config: GridConfig) -> str:
                         current_x += w + this_gap_h
                     continue
 
-                has_crops = should_apply_crop(row_idx, col_idx, config)
+                crop_regions = get_crop_regions_for_cell(row_idx, col_idx, config)
+                has_crops = bool(crop_regions) and should_apply_crop(
+                    row_idx, col_idx, config
+                )
+
                 orig_w, orig_h = calculate_image_size_fit(
                     image_path, metrics.main_width, metrics.main_height, config.fit_mode
                 )
@@ -1214,13 +1430,12 @@ def create_grid_presentation(config: GridConfig) -> str:
                         orig_w,
                         orig_h,
                         image_path,
-                        config.crop_regions,
+                        crop_regions,
                         config.crop_border_width,
                         config.crop_border_shape,
                     )
 
-                # Add cropped images
-                if has_crops and num_crops > 0:
+                if has_crops and len(crop_regions) > 0:
                     _add_crop_images(
                         slide,
                         config,
@@ -1229,6 +1444,7 @@ def create_grid_presentation(config: GridConfig) -> str:
                         temp_dir,
                         row_idx,
                         col_idx,
+                        crop_regions,
                         final_main_left,
                         final_main_top,
                         orig_w,
@@ -1238,6 +1454,28 @@ def create_grid_presentation(config: GridConfig) -> str:
                         border_offset_cm,
                         half_border,
                     )
+
+                # Add text label if enabled
+                if config.label_config.enabled:
+                    label_text = generate_label_text(config, image_path, row_idx, col_idx)
+                    if label_text:
+                        label_h = calculate_label_height(config.label_config)
+                        label_gap = config.label_config.gap
+
+                        if config.label_config.position == "top":
+                            label_top = final_main_top - label_gap - label_h
+                        else:  # bottom
+                            label_top = final_main_top + orig_h + label_gap
+
+                        add_text_label(
+                            slide,
+                            label_text,
+                            final_main_left,
+                            label_top,
+                            orig_w,
+                            label_h,
+                            config.label_config,
+                        )
 
                 # Advance X position
                 if config.layout_mode == "flow":
@@ -1267,6 +1505,7 @@ def _add_crop_images(
     temp_dir: str,
     row_idx: int,
     col_idx: int,
+    crop_regions: List[CropRegion],
     final_main_left: float,
     final_main_top: float,
     orig_w: float,
@@ -1278,9 +1517,9 @@ def _add_crop_images(
 ) -> None:
     """Add cropped images next to the main image."""
     disp = config.crop_display
-    num_crops = len(config.crop_regions)
+    num_crops = len(crop_regions)
 
-    for crop_idx, region in enumerate(config.crop_regions):
+    for crop_idx, region in enumerate(crop_regions):
         crop_filename = f"crop_{row_idx}_{col_idx}_{crop_idx}.png"
         crop_path = os.path.join(temp_dir, crop_filename)
         try:
@@ -1347,6 +1586,39 @@ def _add_crop_images(
                 config.zoom_border_shape,
             )
 
+        # Draw connector line if enabled
+        if config.connector.show:
+            # Calculate crop border position on main image
+            try:
+                orig_width_px, orig_height_px = get_image_dimensions(image_path)
+                x, y, w, h = resolve_crop_box(region, orig_width_px, orig_height_px)
+
+                scale_x = orig_w / orig_width_px
+                scale_y = orig_h / orig_height_px
+
+                border_left = final_main_left + x * scale_x
+                border_top = final_main_top + y * scale_y
+                border_w = w * scale_x
+                border_h = h * scale_y
+
+                # Calculate connector points
+                (start_x, start_y), (end_x, end_y) = calculate_connector_points(
+                    border_left, border_top, border_w, border_h,
+                    c_left, c_top, cw, ch,
+                    disp.position,
+                )
+
+                # Draw connector line
+                add_connector_line(
+                    slide,
+                    start_x, start_y,
+                    end_x, end_y,
+                    config.connector,
+                    region.color,
+                )
+            except Exception:
+                pass  # Skip connector if there's an error
+
 
 def _resolve_crop_size(
     config: GridConfig,
@@ -1405,14 +1677,20 @@ def _calculate_crop_absolute_vertical_position(
     elif region.align == "end":
         return final_main_top + orig_h - ch + region.offset - half_border
     else:  # auto
-        if disp.scale is not None or disp.size is not None:
-            return final_main_top + crop_idx * (ch + global_gap_cc)
+        # 最初と最後のクロップは端に揃える（pin ends）
+        if crop_idx == 0:
+            return final_main_top
+        elif num_crops > 1 and crop_idx == num_crops - 1:
+            return (final_main_top + orig_h) - ch
         else:
-            if crop_idx == 0:
-                return final_main_top
-            elif num_crops > 1 and crop_idx == num_crops - 1:
-                return (final_main_top + orig_h) - ch
+            # 中間のクロップは均等配置
+            if disp.scale is not None or disp.size is not None:
+                # scale/size指定時: 等間隔で配置
+                total_crop_h = num_crops * ch + (num_crops - 1) * global_gap_cc
+                start_y = final_main_top + (orig_h - total_crop_h) / 2
+                return start_y + crop_idx * (ch + global_gap_cc)
             else:
+                # fit時: スロットの中央に配置
                 single_h = (orig_h - global_gap_cc * (num_crops - 1)) / num_crops
                 slot_top = final_main_top + crop_idx * (single_h + global_gap_cc)
                 return slot_top + (single_h - ch) / 2
@@ -1437,17 +1715,170 @@ def _calculate_crop_absolute_horizontal_position(
     elif region.align == "end":
         return final_main_left + orig_w - cw + region.offset - half_border
     else:  # auto
-        if disp.scale is not None or disp.size is not None:
-            return final_main_left + crop_idx * (cw + global_gap_cc)
+        # 最初と最後のクロップは端に揃える（pin ends）
+        if crop_idx == 0:
+            return final_main_left
+        elif num_crops > 1 and crop_idx == num_crops - 1:
+            return (final_main_left + orig_w) - cw
         else:
-            if crop_idx == 0:
-                return final_main_left
-            elif num_crops > 1 and crop_idx == num_crops - 1:
-                return (final_main_left + orig_w) - cw
+            # 中間のクロップは均等配置
+            if disp.scale is not None or disp.size is not None:
+                # scale/size指定時: 等間隔で配置
+                total_crop_w = num_crops * cw + (num_crops - 1) * global_gap_cc
+                start_x = final_main_left + (orig_w - total_crop_w) / 2
+                return start_x + crop_idx * (cw + global_gap_cc)
             else:
+                # fit時: スロットの中央に配置
                 single_w = (orig_w - global_gap_cc * (num_crops - 1)) / num_crops
                 slot_left = final_main_left + crop_idx * (single_w + global_gap_cc)
                 return slot_left + (single_w - cw) / 2
+
+
+# =============================================================================
+# Text Label Functions
+# =============================================================================
+
+
+def generate_label_text(
+    config: GridConfig,
+    image_path: Optional[str],
+    row_idx: int,
+    col_idx: int,
+) -> str:
+    """Generate label text based on label mode."""
+    label_config = config.label_config
+
+    if label_config.mode == "filename":
+        if image_path:
+            return Path(image_path).stem
+        return ""
+    elif label_config.mode == "number":
+        # Calculate sequential number (row-major order)
+        n = row_idx * config.cols + col_idx + 1
+        return label_config.number_format.format(n=n)
+    elif label_config.mode == "custom":
+        idx = row_idx * config.cols + col_idx
+        if idx < len(label_config.custom_texts):
+            return label_config.custom_texts[idx]
+        return ""
+    return ""
+
+
+def add_text_label(
+    slide,
+    text: str,
+    left: float,
+    top: float,
+    width: float,
+    height: float,
+    label_config: LabelConfig,
+) -> None:
+    """Add a text label to the slide."""
+    if not text:
+        return
+
+    # Create text box
+    textbox = slide.shapes.add_textbox(
+        cm_to_emu(left),
+        cm_to_emu(top),
+        cm_to_emu(width),
+        cm_to_emu(height),
+    )
+
+    # Configure text frame
+    tf = textbox.text_frame
+    tf.word_wrap = False
+
+    # Add text
+    p = tf.paragraphs[0]
+    p.text = text
+    p.alignment = PP_ALIGN.CENTER
+
+    # Configure font
+    run = p.runs[0]
+    run.font.name = label_config.font_name
+    run.font.size = Pt(label_config.font_size)
+    run.font.bold = label_config.font_bold
+    run.font.color.rgb = RGBColor(*label_config.font_color)
+
+
+def calculate_label_height(label_config: LabelConfig) -> float:
+    """Calculate label height in cm based on font size."""
+    # Approximate: font size (pt) * 1.2 / 72 inches * 2.54 cm
+    return label_config.font_size * 1.5 / 72 * 2.54
+
+
+# =============================================================================
+# Connector Line Functions
+# =============================================================================
+
+
+def add_connector_line(
+    slide,
+    start_x: float,
+    start_y: float,
+    end_x: float,
+    end_y: float,
+    connector_config: ConnectorConfig,
+    region_color: Tuple[int, int, int],
+) -> None:
+    """Add a connector line between crop border and zoomed image."""
+    # Use region color if no specific color is set
+    line_color = connector_config.color if connector_config.color else region_color
+
+    # Create a straight connector using add_connector
+    connector = slide.shapes.add_connector(
+        MSO_CONNECTOR.STRAIGHT,
+        cm_to_emu(start_x),
+        cm_to_emu(start_y),
+        cm_to_emu(end_x),
+        cm_to_emu(end_y),
+    )
+
+    # Style the line
+    connector.line.color.rgb = RGBColor(*line_color)
+    connector.line.width = pt_to_emu(connector_config.width)
+
+    # Set dash style
+    if connector_config.dash_style == "dash":
+        connector.line.dash_style = MSO_LINE_DASH_STYLE.DASH
+    elif connector_config.dash_style == "dot":
+        connector.line.dash_style = MSO_LINE_DASH_STYLE.ROUND_DOT
+    else:  # solid
+        connector.line.dash_style = MSO_LINE_DASH_STYLE.SOLID
+
+
+def calculate_connector_points(
+    crop_border_left: float,
+    crop_border_top: float,
+    crop_border_width: float,
+    crop_border_height: float,
+    zoom_left: float,
+    zoom_top: float,
+    zoom_width: float,
+    zoom_height: float,
+    position: str,
+) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+    """
+    Calculate start and end points for connector line.
+
+    Returns:
+        Tuple of (start_point, end_point) where each point is (x, y)
+    """
+    if position == "right":
+        # Connect from right edge of crop border to left edge of zoom image
+        start_x = crop_border_left + crop_border_width
+        start_y = crop_border_top + crop_border_height / 2
+        end_x = zoom_left
+        end_y = zoom_top + zoom_height / 2
+    else:  # bottom
+        # Connect from bottom edge of crop border to top edge of zoom image
+        start_x = crop_border_left + crop_border_width / 2
+        start_y = crop_border_top + crop_border_height
+        end_x = zoom_left + zoom_width / 2
+        end_y = zoom_top
+
+    return (start_x, start_y), (end_x, end_y)
 
 
 # =============================================================================
@@ -1553,3 +1984,172 @@ def generate_sample_config(output_path: str) -> None:
     """Generate a sample configuration file."""
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(SAMPLE_CONFIG)
+
+
+# =============================================================================
+# Crop Presets
+# =============================================================================
+
+PRESETS_FILE = "crop_presets.yaml"
+
+
+def get_default_presets() -> List[CropPreset]:
+    """ビルトインプリセットを返す（ズーム用プリセット）"""
+    return [
+        CropPreset(
+            name="左右ズーム",
+            description="左右の2箇所を拡大表示",
+            display_position="bottom",
+            regions=[
+                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
+                           x_ratio=0.05, y_ratio=0.25, width_ratio=0.25, height_ratio=0.5,
+                           color=(255, 0, 0), name="左"),
+                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
+                           x_ratio=0.70, y_ratio=0.25, width_ratio=0.25, height_ratio=0.5,
+                           color=(0, 0, 255), name="右"),
+            ]
+        ),
+        CropPreset(
+            name="上下ズーム",
+            description="上下の2箇所を拡大表示",
+            display_position="right",
+            regions=[
+                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
+                           x_ratio=0.25, y_ratio=0.05, width_ratio=0.5, height_ratio=0.25,
+                           color=(255, 0, 0), name="上"),
+                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
+                           x_ratio=0.25, y_ratio=0.70, width_ratio=0.5, height_ratio=0.25,
+                           color=(0, 0, 255), name="下"),
+            ]
+        ),
+        CropPreset(
+            name="4隅ズーム",
+            description="4隅を拡大表示",
+            display_position="bottom",
+            regions=[
+                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
+                           x_ratio=0.0, y_ratio=0.0, width_ratio=0.2, height_ratio=0.2,
+                           color=(255, 0, 0), name="左上"),
+                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
+                           x_ratio=0.8, y_ratio=0.0, width_ratio=0.2, height_ratio=0.2,
+                           color=(0, 255, 0), name="右上"),
+                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
+                           x_ratio=0.0, y_ratio=0.8, width_ratio=0.2, height_ratio=0.2,
+                           color=(0, 0, 255), name="左下"),
+                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
+                           x_ratio=0.8, y_ratio=0.8, width_ratio=0.2, height_ratio=0.2,
+                           color=(255, 255, 0), name="右下"),
+            ]
+        ),
+        CropPreset(
+            name="中央ズーム",
+            description="中央部分を拡大表示",
+            display_position="right",
+            regions=[
+                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
+                           x_ratio=0.35, y_ratio=0.35, width_ratio=0.3, height_ratio=0.3,
+                           color=(255, 0, 0), name="中央"),
+            ]
+        ),
+        CropPreset(
+            name="中央＋4隅ズーム",
+            description="中央と4隅を拡大表示",
+            display_position="bottom",
+            regions=[
+                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
+                           x_ratio=0.0, y_ratio=0.0, width_ratio=0.15, height_ratio=0.15,
+                           color=(255, 0, 0), name="左上"),
+                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
+                           x_ratio=0.425, y_ratio=0.425, width_ratio=0.15, height_ratio=0.15,
+                           color=(0, 255, 0), name="中央"),
+                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
+                           x_ratio=0.85, y_ratio=0.85, width_ratio=0.15, height_ratio=0.15,
+                           color=(0, 0, 255), name="右下"),
+            ]
+        ),
+        CropPreset(
+            name="横3箇所ズーム",
+            description="横に3箇所を拡大表示",
+            display_position="bottom",
+            regions=[
+                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
+                           x_ratio=0.05, y_ratio=0.3, width_ratio=0.2, height_ratio=0.4,
+                           color=(255, 0, 0), name="左"),
+                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
+                           x_ratio=0.4, y_ratio=0.3, width_ratio=0.2, height_ratio=0.4,
+                           color=(0, 255, 0), name="中"),
+                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
+                           x_ratio=0.75, y_ratio=0.3, width_ratio=0.2, height_ratio=0.4,
+                           color=(0, 0, 255), name="右"),
+            ]
+        ),
+    ]
+
+
+def load_crop_presets(filepath: Optional[str] = None) -> List[CropPreset]:
+    """プリセットをファイルから読み込む（デフォルトプリセット + ユーザー定義）"""
+    presets = get_default_presets()
+
+    if filepath is None:
+        filepath = PRESETS_FILE
+
+    if Path(filepath).exists():
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                data = yaml.safe_load(f)
+            if data and 'presets' in data:
+                for p in data['presets']:
+                    regions = []
+                    for i, r in enumerate(p.get('regions', [])):
+                        regions.append(_parse_crop_region_dict(r, f"preset_{i}"))
+                    presets.append(CropPreset(
+                        name=p.get('name', 'Unknown'),
+                        regions=regions,
+                        description=p.get('description', ''),
+                        display_position=p.get('display_position', 'right')
+                    ))
+        except Exception:
+            pass  # ファイル読み込みエラーは無視
+
+    return presets
+
+
+def save_crop_preset(preset: CropPreset, filepath: Optional[str] = None) -> None:
+    """プリセットをファイルに保存"""
+    if filepath is None:
+        filepath = PRESETS_FILE
+
+    # 既存のプリセットを読み込む
+    presets_data: List[dict] = []
+    if Path(filepath).exists():
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                data = yaml.safe_load(f) or {}
+            presets_data = data.get('presets', [])
+        except Exception:
+            pass
+
+    # 同名のプリセットがあれば上書き
+    presets_data = [p for p in presets_data if p.get('name') != preset.name]
+
+    # 新しいプリセットを追加
+    presets_data.append({
+        'name': preset.name,
+        'description': preset.description,
+        'display_position': preset.display_position,
+        'regions': [
+            {
+                'name': r.name,
+                'x': r.x, 'y': r.y, 'width': r.width, 'height': r.height,
+                'color': list(r.color),
+                'align': r.align, 'offset': r.offset, 'gap': r.gap,
+                'mode': r.mode,
+                'x_ratio': r.x_ratio, 'y_ratio': r.y_ratio,
+                'width_ratio': r.width_ratio, 'height_ratio': r.height_ratio,
+            }
+            for r in preset.regions
+        ]
+    })
+
+    with open(filepath, 'w', encoding='utf-8') as f:
+        yaml.dump({'presets': presets_data}, f, allow_unicode=True)

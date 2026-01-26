@@ -22,9 +22,11 @@ Usage:
 """
 
 import sys
+import copy
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, colorchooser
-from typing import Optional
+from typing import Optional, List, Dict, Tuple
+from dataclasses import dataclass, field
 
 from PIL import Image, ImageTk
 
@@ -34,6 +36,9 @@ from core import (
     CropRegion,
     CropDisplayConfig,
     LayoutMetrics,
+    CropPreset,
+    LabelConfig,
+    ConnectorConfig,
     load_config,
     save_config,
     get_sorted_images,
@@ -43,7 +48,66 @@ from core import (
     calculate_size_fit_static,
     should_apply_crop,
     pt_to_cm,
+    load_crop_presets,
+    save_crop_preset,
 )
+
+
+# =============================================================================
+# Undo/Redo Support
+# =============================================================================
+
+
+@dataclass
+class AppState:
+    """アプリケーション状態のスナップショット"""
+    folders: List[str] = field(default_factory=list)
+    images: List[str] = field(default_factory=list)
+    crop_regions: List[CropRegion] = field(default_factory=list)
+    input_mode: str = "folders"
+    rows: int = 3
+    cols: int = 3
+
+
+class UndoRedoManager:
+    """Undo/Redo履歴管理"""
+
+    def __init__(self, max_history: int = 50):
+        self.history: List[AppState] = []
+        self.redo_stack: List[AppState] = []
+        self.max_history = max_history
+        self.is_restoring = False
+
+    def push(self, state: AppState) -> None:
+        """状態を履歴に追加"""
+        if self.is_restoring:
+            return
+        self.history.append(state)
+        if len(self.history) > self.max_history:
+            self.history.pop(0)
+        self.redo_stack.clear()
+
+    def undo(self) -> Optional[AppState]:
+        """1つ前の状態を返す"""
+        if len(self.history) < 2:
+            return None
+        current = self.history.pop()
+        self.redo_stack.append(current)
+        return self.history[-1] if self.history else None
+
+    def redo(self) -> Optional[AppState]:
+        """やり直し状態を返す"""
+        if not self.redo_stack:
+            return None
+        state = self.redo_stack.pop()
+        self.history.append(state)
+        return state
+
+    def can_undo(self) -> bool:
+        return len(self.history) >= 2
+
+    def can_redo(self) -> bool:
+        return len(self.redo_stack) > 0
 
 
 # =============================================================================
@@ -222,6 +286,60 @@ class ImageGridApp:
 
         self._update_preview()
 
+        # Undo/Redo initialization
+        self.undo_manager = UndoRedoManager()
+        self._save_state()  # 初期状態を保存
+        self._bind_keyboard_shortcuts()
+
+    def _bind_keyboard_shortcuts(self):
+        """キーボードショートカットをバインド"""
+        self.root.bind('<Control-z>', lambda e: self._undo())
+        self.root.bind('<Control-y>', lambda e: self._redo())
+        self.root.bind('<Control-Z>', lambda e: self._redo())  # Ctrl+Shift+Z
+
+    def _get_current_state(self) -> AppState:
+        """現在の状態をスナップショットとして取得"""
+        return AppState(
+            folders=copy.deepcopy(self.folders),
+            images=copy.deepcopy(self.images),
+            crop_regions=copy.deepcopy(self.crop_regions),
+            input_mode=self.input_mode.get(),
+            rows=self.rows.get(),
+            cols=self.cols.get(),
+        )
+
+    def _restore_state(self, state: AppState) -> None:
+        """状態を復元"""
+        self.undo_manager.is_restoring = True
+        try:
+            self.folders = copy.deepcopy(state.folders)
+            self.images = copy.deepcopy(state.images)
+            self.crop_regions = copy.deepcopy(state.crop_regions)
+            self.input_mode.set(state.input_mode)
+            self.rows.set(state.rows)
+            self.cols.set(state.cols)
+            self._refresh_input_listbox()
+            self._update_region_list()
+            self._schedule_preview()
+        finally:
+            self.undo_manager.is_restoring = False
+
+    def _save_state(self):
+        """現在の状態を履歴に保存"""
+        self.undo_manager.push(self._get_current_state())
+
+    def _undo(self):
+        """Undo操作"""
+        state = self.undo_manager.undo()
+        if state:
+            self._restore_state(state)
+
+    def _redo(self):
+        """Redo操作"""
+        state = self.undo_manager.redo()
+        if state:
+            self._restore_state(state)
+
     def _init_variables(self):
         """Initialize all tkinter variables."""
         # Output settings
@@ -279,6 +397,29 @@ class ImageGridApp:
         self.show_zoom_border = tk.BooleanVar(value=True)
         self.zoom_border_w = tk.DoubleVar(value=1.5)
         self.zoom_border_shape = tk.StringVar(value="rectangle")
+
+        # Label settings
+        self.label_enabled = tk.BooleanVar(value=False)
+        self.label_mode = tk.StringVar(value="filename")  # filename, number, custom
+        self.label_position = tk.StringVar(value="bottom")  # top, bottom
+        self.label_font_name = tk.StringVar(value="Arial")
+        self.label_font_size = tk.DoubleVar(value=10.0)
+        self.label_font_color = (0, 0, 0)
+        self.label_font_bold = tk.BooleanVar(value=False)
+        self.label_number_format = tk.StringVar(value="({n})")
+        self.label_custom_texts = tk.StringVar(value="")  # comma-separated
+        self.label_gap = tk.DoubleVar(value=0.1)
+
+        # Template settings
+        self.template_path = tk.StringVar(value="")
+        self.slide_layout_index = tk.IntVar(value=6)
+
+        # Connector settings
+        self.connector_show = tk.BooleanVar(value=False)
+        self.connector_width = tk.DoubleVar(value=1.0)
+        self.connector_color = None  # None means use crop region color
+        self.connector_style = tk.StringVar(value="straight")
+        self.connector_dash_style = tk.StringVar(value="solid")
 
         # Preview settings
         self.dummy_ratio_w = tk.DoubleVar(value=1.0)
@@ -416,6 +557,13 @@ class ImageGridApp:
         ttk.Button(btn_frame, text="クリア", command=self._clear_inputs).pack(
             side=tk.LEFT, padx=2
         )
+        # 並び替えボタン
+        ttk.Button(btn_frame, text="↑上へ", command=self._move_input_up).pack(
+            side=tk.LEFT, padx=2
+        )
+        ttk.Button(btn_frame, text="↓下へ", command=self._move_input_down).pack(
+            side=tk.LEFT, padx=2
+        )
 
         self.folder_listbox = tk.Listbox(f_folders, selectmode=tk.EXTENDED)
         self.folder_listbox.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -478,6 +626,23 @@ class ImageGridApp:
         ttk.Entry(f_slide, textvariable=self.slide_h, width=6).pack(
             side=tk.LEFT, padx=5
         )
+
+        # Template settings
+        f_tpl = ttk.LabelFrame(self.tab_layout, text="テンプレートPPTX (オプション)", padding=5)
+        f_tpl.pack(fill=tk.X, pady=5)
+
+        f_tpl_row1 = ttk.Frame(f_tpl)
+        f_tpl_row1.pack(fill=tk.X)
+        ttk.Label(f_tpl_row1, text="テンプレート:").pack(side=tk.LEFT)
+        ttk.Entry(f_tpl_row1, textvariable=self.template_path, width=30).pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        ttk.Button(f_tpl_row1, text="参照", command=self._browse_template).pack(side=tk.LEFT, padx=2)
+        ttk.Button(f_tpl_row1, text="クリア", command=lambda: self.template_path.set("")).pack(side=tk.LEFT, padx=2)
+
+        f_tpl_row2 = ttk.Frame(f_tpl)
+        f_tpl_row2.pack(fill=tk.X, pady=2)
+        ttk.Label(f_tpl_row2, text="レイアウト番号:").pack(side=tk.LEFT)
+        ttk.Entry(f_tpl_row2, textvariable=self.slide_layout_index, width=5).pack(side=tk.LEFT, padx=5)
+        ttk.Label(f_tpl_row2, text="(0=タイトル, 6=白紙)").pack(side=tk.LEFT)
 
         # Margins
         f_mg = ttk.LabelFrame(self.tab_layout, text="余白(cm)", padding=5)
@@ -544,6 +709,19 @@ class ImageGridApp:
 
     def _setup_tab_crop(self):
         """Setup crop settings tab."""
+        # Preset section
+        f_preset = ttk.LabelFrame(self.tab_crop, text="クロッププリセット", padding=5)
+        f_preset.pack(fill=tk.X, pady=5)
+
+        self.preset_var = tk.StringVar()
+        self.preset_combo = ttk.Combobox(f_preset, textvariable=self.preset_var, state="readonly", width=20)
+        self.preset_combo.pack(side=tk.LEFT, padx=5)
+
+        ttk.Button(f_preset, text="読込", command=self._load_preset).pack(side=tk.LEFT, padx=2)
+        ttk.Button(f_preset, text="現在の設定を保存", command=self._save_preset_dialog).pack(side=tk.LEFT, padx=2)
+
+        self._refresh_preset_list()
+
         # Region list
         f_reg = ttk.LabelFrame(self.tab_crop, text="領域リスト", padding=5)
         f_reg.pack(fill=tk.X, pady=5)
@@ -740,6 +918,113 @@ class ImageGridApp:
             value="rounded",
         ).pack(side=tk.LEFT, padx=5)
 
+        # Label settings
+        f_label = ttk.LabelFrame(self.tab_style, text="テキストラベル/キャプション", padding=5)
+        f_label.pack(fill=tk.X, pady=5)
+
+        # Enable/disable
+        f_lbl_row1 = ttk.Frame(f_label)
+        f_lbl_row1.pack(fill=tk.X)
+        ttk.Checkbutton(
+            f_lbl_row1, text="ラベルを表示", variable=self.label_enabled
+        ).pack(side=tk.LEFT)
+
+        # Mode selection
+        f_lbl_row2 = ttk.Frame(f_label)
+        f_lbl_row2.pack(fill=tk.X, pady=2)
+        ttk.Label(f_lbl_row2, text="モード:").pack(side=tk.LEFT)
+        ttk.Radiobutton(
+            f_lbl_row2, text="ファイル名", variable=self.label_mode, value="filename"
+        ).pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(
+            f_lbl_row2, text="連番", variable=self.label_mode, value="number"
+        ).pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(
+            f_lbl_row2, text="カスタム", variable=self.label_mode, value="custom"
+        ).pack(side=tk.LEFT, padx=5)
+
+        # Position
+        f_lbl_row3 = ttk.Frame(f_label)
+        f_lbl_row3.pack(fill=tk.X, pady=2)
+        ttk.Label(f_lbl_row3, text="位置:").pack(side=tk.LEFT)
+        ttk.Radiobutton(
+            f_lbl_row3, text="上", variable=self.label_position, value="top"
+        ).pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(
+            f_lbl_row3, text="下", variable=self.label_position, value="bottom"
+        ).pack(side=tk.LEFT, padx=5)
+        ttk.Label(f_lbl_row3, text="間隔(cm):").pack(side=tk.LEFT, padx=(10, 2))
+        ttk.Entry(f_lbl_row3, textvariable=self.label_gap, width=5).pack(side=tk.LEFT)
+
+        # Font settings
+        f_lbl_row4 = ttk.Frame(f_label)
+        f_lbl_row4.pack(fill=tk.X, pady=2)
+        ttk.Label(f_lbl_row4, text="フォント:").pack(side=tk.LEFT)
+        ttk.Entry(f_lbl_row4, textvariable=self.label_font_name, width=12).pack(side=tk.LEFT, padx=2)
+        ttk.Label(f_lbl_row4, text="サイズ(pt):").pack(side=tk.LEFT, padx=(5, 2))
+        ttk.Entry(f_lbl_row4, textvariable=self.label_font_size, width=5).pack(side=tk.LEFT)
+        ttk.Checkbutton(f_lbl_row4, text="太字", variable=self.label_font_bold).pack(side=tk.LEFT, padx=5)
+        self.btn_label_color = tk.Button(
+            f_lbl_row4, text="色", width=4, command=self._pick_label_color
+        )
+        self.btn_label_color.pack(side=tk.LEFT, padx=5)
+
+        # Number format
+        f_lbl_row5 = ttk.Frame(f_label)
+        f_lbl_row5.pack(fill=tk.X, pady=2)
+        ttk.Label(f_lbl_row5, text="連番フォーマット:").pack(side=tk.LEFT)
+        ttk.Entry(f_lbl_row5, textvariable=self.label_number_format, width=10).pack(side=tk.LEFT, padx=2)
+        ttk.Label(f_lbl_row5, text="({n}で番号)").pack(side=tk.LEFT)
+
+        # Custom texts
+        f_lbl_row6 = ttk.Frame(f_label)
+        f_lbl_row6.pack(fill=tk.X, pady=2)
+        ttk.Label(f_lbl_row6, text="カスタムテキスト (カンマ区切り):").pack(side=tk.LEFT)
+        ttk.Entry(f_lbl_row6, textvariable=self.label_custom_texts, width=30).pack(side=tk.LEFT, padx=2, fill=tk.X, expand=True)
+
+        # Connector settings
+        f_conn = ttk.LabelFrame(self.tab_style, text="クロップ連結線", padding=5)
+        f_conn.pack(fill=tk.X, pady=5)
+
+        # Enable/disable
+        f_conn_row1 = ttk.Frame(f_conn)
+        f_conn_row1.pack(fill=tk.X)
+        ttk.Checkbutton(
+            f_conn_row1, text="連結線を表示", variable=self.connector_show
+        ).pack(side=tk.LEFT)
+        ttk.Label(f_conn_row1, text="太さ(pt):").pack(side=tk.LEFT, padx=(10, 2))
+        ttk.Entry(f_conn_row1, textvariable=self.connector_width, width=5).pack(side=tk.LEFT)
+
+        # Style options
+        f_conn_row2 = ttk.Frame(f_conn)
+        f_conn_row2.pack(fill=tk.X, pady=2)
+        ttk.Label(f_conn_row2, text="線種:").pack(side=tk.LEFT)
+        ttk.Radiobutton(
+            f_conn_row2, text="実線", variable=self.connector_dash_style, value="solid"
+        ).pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(
+            f_conn_row2, text="破線", variable=self.connector_dash_style, value="dash"
+        ).pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(
+            f_conn_row2, text="点線", variable=self.connector_dash_style, value="dot"
+        ).pack(side=tk.LEFT, padx=5)
+
+    def _pick_label_color(self):
+        """ラベルの色を選択"""
+        init_color = f"#{self.label_font_color[0]:02x}{self.label_font_color[1]:02x}{self.label_font_color[2]:02x}"
+        color = colorchooser.askcolor(initialcolor=init_color)
+        if color[0]:
+            self.label_font_color = (int(color[0][0]), int(color[0][1]), int(color[0][2]))
+            self._schedule_preview()
+
+    def _browse_template(self):
+        """テンプレートPPTXファイルを選択"""
+        path = filedialog.askopenfilename(
+            filetypes=[("PowerPoint", "*.pptx"), ("All files", "*.*")]
+        )
+        if path:
+            self.template_path.set(path)
+
     def _add_preview_tracers(self):
         """Add trace callbacks for automatic preview updates."""
         vars_to_trace = [
@@ -791,9 +1076,92 @@ class ImageGridApp:
             self.crop_border_shape,
             self.show_crop_border,
             self.crop_border_w,
+            # Label settings
+            self.label_enabled,
+            self.label_mode,
+            self.label_position,
+            self.label_font_name,
+            self.label_font_size,
+            self.label_font_bold,
+            self.label_number_format,
+            self.label_custom_texts,
+            self.label_gap,
+            # Connector settings
+            self.connector_show,
+            self.connector_width,
+            self.connector_style,
+            self.connector_dash_style,
         ]
         for v in vars_to_trace:
             v.trace_add("write", lambda *args: self._schedule_preview())
+
+    def _update_region_list(self):
+        """region_tree を更新"""
+        for item in self.region_tree.get_children():
+            self.region_tree.delete(item)
+        for i, r in enumerate(self.crop_regions):
+            if r.mode == "ratio":
+                # ratioモードの場合はパーセント表示
+                coord = f"({r.x}, {r.y}, {r.width}, {r.height}) [比率]"
+            else:
+                coord = f"({r.x}, {r.y}, {r.width}, {r.height})"
+            self.region_tree.insert("", tk.END, iid=str(i), values=(r.name, coord, r.align))
+
+    def _add_region_dialog(self):
+        """数値入力でクロップ領域を追加"""
+        from tkinter import simpledialog
+        name = simpledialog.askstring("領域追加", "領域名:", initialvalue=f"Region_{len(self.crop_regions) + 1}")
+        if not name:
+            return
+        region = CropRegion(x=0, y=0, width=100, height=100, color=(255, 0, 0), name=name)
+        self.crop_regions.append(region)
+        self._update_region_list()
+        self._schedule_preview()
+        self._save_state()
+
+    def _remove_region(self):
+        """選択したクロップ領域を削除"""
+        sel = self.region_tree.selection()
+        if not sel:
+            return
+        indices = sorted([int(s) for s in sel], reverse=True)
+        for idx in indices:
+            if 0 <= idx < len(self.crop_regions):
+                self.crop_regions.pop(idx)
+        self._update_region_list()
+        self._schedule_preview()
+        self._save_state()
+
+    def _on_region_select(self, event):
+        """領域選択時に詳細を表示"""
+        sel = self.region_tree.selection()
+        if not sel:
+            self.sel_idx = None
+            return
+        idx = int(sel[0])
+        if 0 <= idx < len(self.crop_regions):
+            self.sel_idx = idx
+            r = self.crop_regions[idx]
+            self.r_name.set(r.name)
+            self.r_x.set(r.x)
+            self.r_y.set(r.y)
+            self.r_w.set(r.width)
+            self.r_h.set(r.height)
+            self.r_align.set(r.align)
+            self.r_offset.set(r.offset)
+            self.r_gap.set(str(r.gap) if r.gap is not None else "")
+            self.r_color = r.color
+
+    def _pick_region_color(self):
+        """領域の色を選択"""
+        # 現在の色を16進数文字列に変換
+        init_color = f"#{self.r_color[0]:02x}{self.r_color[1]:02x}{self.r_color[2]:02x}"
+        color = colorchooser.askcolor(initialcolor=init_color)
+        if color[0]:
+            self.r_color = (int(color[0][0]), int(color[0][1]), int(color[0][2]))
+            if self.sel_idx is not None and 0 <= self.sel_idx < len(self.crop_regions):
+                self.crop_regions[self.sel_idx].color = self.r_color
+                self._schedule_preview()
 
     def _schedule_preview(self):
         """Schedule a preview update with debouncing."""
@@ -897,6 +1265,34 @@ class ImageGridApp:
         c.show_zoom_border = self.show_zoom_border.get()
         c.zoom_border_width = self._get_safe_double(self.zoom_border_w, 1.5)
 
+        # Label settings
+        c.label_config = LabelConfig(
+            enabled=self.label_enabled.get(),
+            mode=self.label_mode.get(),
+            position=self.label_position.get(),
+            font_name=self.label_font_name.get(),
+            font_size=self._get_safe_double(self.label_font_size, 10.0),
+            font_color=self.label_font_color,
+            font_bold=self.label_font_bold.get(),
+            number_format=self.label_number_format.get(),
+            custom_texts=[t.strip() for t in self.label_custom_texts.get().split(",") if t.strip()],
+            gap=self._get_safe_double(self.label_gap, 0.1),
+        )
+
+        # Template settings
+        tpl_path = self.template_path.get().strip()
+        c.template_path = tpl_path if tpl_path else None
+        c.slide_layout_index = self._get_safe_int(self.slide_layout_index, 6)
+
+        # Connector settings
+        c.connector = ConnectorConfig(
+            show=self.connector_show.get(),
+            width=self._get_safe_double(self.connector_width, 1.0),
+            color=self.connector_color,
+            style=self.connector_style.get(),
+            dash_style=self.connector_dash_style.get(),
+        )
+
         return c
 
     def _apply_config_to_gui(self, c: GridConfig):
@@ -971,6 +1367,29 @@ class ImageGridApp:
         self.show_zoom_border.set(c.show_zoom_border)
         self.zoom_border_w.set(c.zoom_border_width)
 
+        # Label settings
+        self.label_enabled.set(c.label_config.enabled)
+        self.label_mode.set(c.label_config.mode)
+        self.label_position.set(c.label_config.position)
+        self.label_font_name.set(c.label_config.font_name)
+        self.label_font_size.set(c.label_config.font_size)
+        self.label_font_color = c.label_config.font_color
+        self.label_font_bold.set(c.label_config.font_bold)
+        self.label_number_format.set(c.label_config.number_format)
+        self.label_custom_texts.set(",".join(c.label_config.custom_texts))
+        self.label_gap.set(c.label_config.gap)
+
+        # Template settings
+        self.template_path.set(c.template_path or "")
+        self.slide_layout_index.set(c.slide_layout_index)
+
+        # Connector settings
+        self.connector_show.set(c.connector.show)
+        self.connector_width.set(c.connector.width)
+        self.connector_color = c.connector.color
+        self.connector_style.set(c.connector.style)
+        self.connector_dash_style.set(c.connector.dash_style)
+
     # -------------------------------------------------------------------------
     # Event Handlers
     # -------------------------------------------------------------------------
@@ -1001,6 +1420,7 @@ class ImageGridApp:
                 return
             self.images.extend(list(paths))
             self._refresh_input_listbox()
+            self._save_state()  # Undo/Redo
 
             # Auto-detect aspect ratio from first added image
             try:
@@ -1016,6 +1436,7 @@ class ImageGridApp:
                 return
             self.folders.append(p)
             self._refresh_input_listbox()
+            self._save_state()  # Undo/Redo
 
             # Auto-detect aspect ratio from first image in folder
             try:
@@ -1040,11 +1461,41 @@ class ImageGridApp:
                 if 0 <= i < len(self.folders):
                     self.folders.pop(i)
         self._refresh_input_listbox()
+        self._save_state()  # Undo/Redo
 
     def _clear_inputs(self):
         self.folders = []
         self.images = []
         self._refresh_input_listbox()
+        self._save_state()  # Undo/Redo
+
+    def _move_input_up(self):
+        """選択項目を1つ上に移動"""
+        sel = self.folder_listbox.curselection()
+        if not sel or sel[0] == 0:
+            return
+        idx = sel[0]
+        items = self.folders if self.input_mode.get() == "folders" else self.images
+        if idx > 0 and idx < len(items):
+            items[idx], items[idx - 1] = items[idx - 1], items[idx]
+            self._refresh_input_listbox()
+            self.folder_listbox.selection_set(idx - 1)
+            self._schedule_preview()
+            self._save_state()  # Undo/Redo
+
+    def _move_input_down(self):
+        """選択項目を1つ下に移動"""
+        sel = self.folder_listbox.curselection()
+        items = self.folders if self.input_mode.get() == "folders" else self.images
+        if not sel or sel[0] >= len(items) - 1:
+            return
+        idx = sel[0]
+        if idx >= 0 and idx < len(items) - 1:
+            items[idx], items[idx + 1] = items[idx + 1], items[idx]
+            self._refresh_input_listbox()
+            self.folder_listbox.selection_set(idx + 1)
+            self._schedule_preview()
+            self._save_state()  # Undo/Redo
 
     def _open_crop_editor(self):
         target_img = None
@@ -1096,6 +1547,18 @@ class ImageGridApp:
             )
         if p:
             CropEditor(self.root, p, self._add_region_from_editor)
+
+    def _add_region_from_editor(self, x: int, y: int, w: int, h: int, name: str):
+        """CropEditorからのコールバック - 新しいクロップ領域を追加"""
+        region = CropRegion(
+            x=x, y=y, width=w, height=h,
+            color=(255, 0, 0),
+            name=name or f"Region_{len(self.crop_regions) + 1}"
+        )
+        self.crop_regions.append(region)
+        self._update_region_list()
+        self._schedule_preview()
+        self._save_state()  # Undo/Redo
 
     def _update_preview(self):
         """Render the preview canvas."""
@@ -1380,13 +1843,17 @@ class ImageGridApp:
                 elif region.align == "end":
                     c_t = main_t + img_h_cm - c_h + region.offset - half_border
                 else:  # auto
-                    if disp.scale is not None or disp.size is not None:
-                        c_t = main_t + crop_idx * (c_h + actual_gap_cc)
+                    # 最初と最後のクロップは端に揃える（pin ends）
+                    if crop_idx == 0:
+                        c_t = main_t
+                    elif num_crops > 1 and crop_idx == num_crops - 1:
+                        c_t = (main_t + img_h_cm) - c_h
                     else:
-                        if crop_idx == 0:
-                            c_t = main_t
-                        elif num_crops > 1 and crop_idx == num_crops - 1:
-                            c_t = (main_t + img_h_cm) - c_h
+                        # 中間のクロップは均等配置
+                        if disp.scale is not None or disp.size is not None:
+                            total_crop_h = num_crops * c_h + (num_crops - 1) * actual_gap_cc
+                            start_y = main_t + (img_h_cm - total_crop_h) / 2
+                            c_t = start_y + crop_idx * (c_h + actual_gap_cc)
                         else:
                             single_h = (
                                 img_h_cm - actual_gap_cc * (num_crops - 1)
@@ -1403,13 +1870,17 @@ class ImageGridApp:
                 elif region.align == "end":
                     c_l = main_l + img_w_cm - c_w + region.offset - half_border
                 else:  # auto
-                    if disp.scale is not None or disp.size is not None:
-                        c_l = main_l + crop_idx * (c_w + actual_gap_cc)
+                    # 最初と最後のクロップは端に揃える（pin ends）
+                    if crop_idx == 0:
+                        c_l = main_l
+                    elif num_crops > 1 and crop_idx == num_crops - 1:
+                        c_l = (main_l + img_w_cm) - c_w
                     else:
-                        if crop_idx == 0:
-                            c_l = main_l
-                        elif num_crops > 1 and crop_idx == num_crops - 1:
-                            c_l = (main_l + img_w_cm) - c_w
+                        # 中間のクロップは均等配置
+                        if disp.scale is not None or disp.size is not None:
+                            total_crop_w = num_crops * c_w + (num_crops - 1) * actual_gap_cc
+                            start_x = main_l + (img_w_cm - total_crop_w) / 2
+                            c_l = start_x + crop_idx * (c_w + actual_gap_cc)
                         else:
                             single_w = (
                                 img_w_cm - actual_gap_cc * (num_crops - 1)
@@ -1426,6 +1897,172 @@ class ImageGridApp:
                 fill="#fdd",
                 outline="red",
             )
+
+    # -------------------------------------------------------------------------
+    # Preset Methods
+    # -------------------------------------------------------------------------
+
+    def _refresh_preset_list(self):
+        """プリセットリストを更新"""
+        presets = load_crop_presets()
+        preset_names = [p.name for p in presets]
+        self.preset_combo["values"] = preset_names
+        if preset_names:
+            self.preset_combo.current(0)
+
+    def _load_preset(self):
+        """選択したプリセットを読み込む"""
+        preset_name = self.preset_var.get()
+        if not preset_name:
+            messagebox.showwarning("警告", "プリセットを選択してください")
+            return
+
+        presets = load_crop_presets()
+        for preset in presets:
+            if preset.name == preset_name:
+                self.crop_regions = copy.deepcopy(preset.regions)
+                # ratio モードのリージョンをピクセルモードに変換
+                # 基準サイズは1000x1000を使用（編集しやすい値）
+                ref_size = 1000
+                for region in self.crop_regions:
+                    if region.mode == "ratio":
+                        region.x = int((region.x_ratio or 0) * ref_size)
+                        region.y = int((region.y_ratio or 0) * ref_size)
+                        region.width = int((region.width_ratio or 0) * ref_size)
+                        region.height = int((region.height_ratio or 0) * ref_size)
+                        # ratio値もpx値と同期させる（将来の互換性のため）
+                        region.x_ratio = region.x / ref_size
+                        region.y_ratio = region.y / ref_size
+                        region.width_ratio = region.width / ref_size
+                        region.height_ratio = region.height / ref_size
+                        region.mode = "ratio"  # ratioモードを維持（異なる画像サイズに対応）
+                # 配置方向も適用
+                self.crop_pos.set(preset.display_position)
+                self._update_region_list()
+                self._schedule_preview()
+                self._save_state()
+                messagebox.showinfo("成功", f"プリセット '{preset_name}' を読み込みました")
+                return
+
+        messagebox.showerror("エラー", f"プリセット '{preset_name}' が見つかりません")
+
+    def _save_preset_dialog(self):
+        """現在のクロップ設定をプリセットとして保存"""
+        from tkinter import simpledialog
+
+        if not self.crop_regions:
+            messagebox.showwarning("警告", "保存するクロップ領域がありません")
+            return
+
+        name = simpledialog.askstring("プリセット保存", "プリセット名:")
+        if not name:
+            return
+
+        description = simpledialog.askstring("プリセット保存", "説明 (オプション):", initialvalue="")
+
+        preset = CropPreset(
+            name=name,
+            regions=copy.deepcopy(self.crop_regions),
+            description=description or "",
+            display_position=self.crop_pos.get()  # 現在の配置方向も保存
+        )
+
+        try:
+            save_crop_preset(preset)
+            self._refresh_preset_list()
+            messagebox.showinfo("成功", f"プリセット '{name}' を保存しました")
+        except Exception as e:
+            messagebox.showerror("エラー", f"保存に失敗しました: {e}")
+
+    # -------------------------------------------------------------------------
+    # Config & Generation Methods
+    # -------------------------------------------------------------------------
+
+    def _load_config_gui(self):
+        """設定ファイルを読み込む"""
+        path = filedialog.askopenfilename(
+            filetypes=[("YAML files", "*.yaml;*.yml"), ("All files", "*.*")]
+        )
+        if not path:
+            return
+        try:
+            config = load_config(path)
+            self._apply_config_to_gui(config)
+            self._save_state()
+            messagebox.showinfo("成功", f"設定を読み込みました: {path}")
+        except Exception as e:
+            messagebox.showerror("エラー", f"読み込みに失敗しました: {e}")
+
+    def _save_config(self):
+        """設定ファイルを保存する"""
+        path = filedialog.asksaveasfilename(
+            defaultextension=".yaml",
+            filetypes=[("YAML files", "*.yaml;*.yml"), ("All files", "*.*")]
+        )
+        if not path:
+            return
+        try:
+            config = self._get_current_config()
+            save_config(config, path)
+            messagebox.showinfo("成功", f"設定を保存しました: {path}")
+        except Exception as e:
+            messagebox.showerror("エラー", f"保存に失敗しました: {e}")
+
+    def _generate(self):
+        """PPTXファイルを生成する"""
+        config = self._get_current_config()
+
+        # Validate inputs
+        if self.input_mode.get() == "images":
+            if not self.images:
+                messagebox.showerror("エラー", "画像が追加されていません")
+                return
+        else:
+            if not self.folders:
+                messagebox.showerror("エラー", "フォルダが追加されていません")
+                return
+
+        try:
+            create_grid_presentation(config)
+            messagebox.showinfo("成功", f"PPTXを生成しました: {config.output}")
+        except Exception as e:
+            messagebox.showerror("エラー", f"生成に失敗しました: {e}")
+
+    def _update_region_detail(self):
+        """選択した領域の詳細を更新"""
+        if self.sel_idx is None or self.sel_idx >= len(self.crop_regions):
+            return
+
+        region = self.crop_regions[self.sel_idx]
+        region.name = self.r_name.get()
+        region.x = self._get_safe_int(self.r_x, region.x)
+        region.y = self._get_safe_int(self.r_y, region.y)
+        region.width = self._get_safe_int(self.r_w, region.width)
+        region.height = self._get_safe_int(self.r_h, region.height)
+        region.align = self.r_align.get()
+        region.offset = self._get_safe_double(self.r_offset, 0.0)
+        region.color = self.r_color
+
+        # ratio モードの場合、ratio値も更新（基準サイズ1000で計算）
+        if region.mode == "ratio":
+            ref_size = 1000
+            region.x_ratio = region.x / ref_size
+            region.y_ratio = region.y / ref_size
+            region.width_ratio = region.width / ref_size
+            region.height_ratio = region.height / ref_size
+
+        gap_str = self.r_gap.get().strip()
+        if gap_str:
+            try:
+                region.gap = float(gap_str)
+            except ValueError:
+                region.gap = None
+        else:
+            region.gap = None
+
+        self._update_region_list()
+        self._schedule_preview()
+        self._save_state()
 
 
 # =============================================================================
