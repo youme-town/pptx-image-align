@@ -1793,6 +1793,56 @@ class ImageGridApp:
         disp = config.crop_display
         num_crops = len(config.crop_regions)
 
+        # ----------------------
+        # Step 1: Draw crop source regions on main image
+        # ----------------------
+        for region in config.crop_regions:
+            # Calculate crop region position (relative to main image)
+            if region.mode == "ratio":
+                # Use ratio-based positioning
+                rx = region.x_ratio or 0.0
+                ry = region.y_ratio or 0.0
+                rw = region.width_ratio or 0.0
+                rh = region.height_ratio or 0.0
+            else:
+                # Use pixel-based positioning (normalize to 0-1 using 1000 as reference)
+                rx = region.x / 1000.0
+                ry = region.y / 1000.0
+                rw = region.width / 1000.0
+                rh = region.height / 1000.0
+
+            # Convert to canvas coordinates
+            crop_l = main_l + rx * img_w_cm
+            crop_t = main_t + ry * img_h_cm
+            crop_w = rw * img_w_cm
+            crop_h = rh * img_h_cm
+
+            # Draw crop region rectangle on main image
+            color = "#%02x%02x%02x" % region.color
+            canvas.create_rectangle(
+                tx(crop_l),
+                ty(crop_t),
+                tx(crop_l + crop_w),
+                ty(crop_t + crop_h),
+                fill="",
+                outline=color,
+                width=1,
+            )
+
+            # Draw region name label
+            if region.name:
+                canvas.create_text(
+                    tx(crop_l + crop_w / 2),
+                    ty(crop_t + crop_h / 2),
+                    text=region.name,
+                    fill=color,
+                    font=("Arial", 8, "bold"),
+                )
+
+        # ----------------------
+        # Step 2: Draw cropped (zoomed) previews at destination position
+        # ----------------------
+
         actual_gap_mc = disp.main_crop_gap.to_cm(
             img_w_cm if disp.position == "right" else img_h_cm
         )
@@ -1805,27 +1855,48 @@ class ImageGridApp:
             actual_gap_cc += border_offset_cm
 
         for crop_idx, region in enumerate(config.crop_regions):
-            # Calculate crop size
+            # Get crop region aspect ratio
+            if region.mode == "ratio":
+                crop_rw = region.width_ratio or 0.1
+                crop_rh = region.height_ratio or 0.1
+            else:
+                crop_rw = region.width / 1000.0 if region.width > 0 else 0.1
+                crop_rh = region.height / 1000.0 if region.height > 0 else 0.1
+            # クロップ領域の実際のピクセル比率（画像のアスペクト比を考慮）
+            crop_aspect = (crop_rw * img_w_cm) / (crop_rh * img_h_cm) if crop_rh > 0 else 1.0
+
+            # Calculate crop size (maintaining aspect ratio)
             if disp.scale is not None or disp.size is not None:
                 if disp.size:
-                    c_w = c_h = disp.size
+                    # サイズ指定時はアスペクト比を維持
+                    if crop_aspect >= 1.0:
+                        c_w = disp.size
+                        c_h = disp.size / crop_aspect
+                    else:
+                        c_h = disp.size
+                        c_w = disp.size * crop_aspect
                 else:
-                    c_w = (
+                    base = (
                         img_w_cm * disp.scale
                         if disp.position == "right"
                         else img_h_cm * disp.scale
                     )
-                    c_h = c_w
+                    if crop_aspect >= 1.0:
+                        c_w = base
+                        c_h = base / crop_aspect
+                    else:
+                        c_h = base
+                        c_w = base * crop_aspect
             else:
                 if disp.position == "right":
                     single_h = (img_h_cm - actual_gap_cc * (num_crops - 1)) / num_crops
                     c_w, c_h = calculate_size_fit_static(
-                        100, 100, metrics.crop_size, single_h, "fit"
+                        int(crop_aspect * 100), 100, metrics.crop_size, single_h, "fit"
                     )
                 else:
                     single_w = (img_w_cm - actual_gap_cc * (num_crops - 1)) / num_crops
                     c_w, c_h = calculate_size_fit_static(
-                        100, 100, single_w, metrics.crop_size, "fit"
+                        int(crop_aspect * 100), 100, single_w, metrics.crop_size, "fit"
                     )
 
             # Calculate position
@@ -1888,15 +1959,32 @@ class ImageGridApp:
                             slot_left = main_l + crop_idx * (single_w + actual_gap_cc)
                             c_l = slot_left + (single_w - c_w) / 2
 
-            # Draw crop placeholder
+            # Draw crop placeholder (with matching color)
+            color = "#%02x%02x%02x" % region.color
+            # Lighten the fill color
+            fill_r = min(255, region.color[0] + 200)
+            fill_g = min(255, region.color[1] + 200)
+            fill_b = min(255, region.color[2] + 200)
+            fill_color = "#%02x%02x%02x" % (fill_r, fill_g, fill_b)
             canvas.create_rectangle(
                 tx(c_l),
                 ty(c_t),
                 tx(c_l + c_w),
                 ty(c_t + c_h),
-                fill="#fdd",
-                outline="red",
+                fill=fill_color,
+                outline=color,
+                width=1,
             )
+
+            # Draw region name in zoomed preview
+            if region.name:
+                canvas.create_text(
+                    tx(c_l + c_w / 2),
+                    ty(c_t + c_h / 2),
+                    text=region.name,
+                    fill=color,
+                    font=("Arial", 8, "bold"),
+                )
 
     # -------------------------------------------------------------------------
     # Preset Methods

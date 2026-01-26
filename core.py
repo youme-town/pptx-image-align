@@ -2010,6 +2010,32 @@ def get_default_presets() -> List[CropPreset]:
             ]
         ),
         CropPreset(
+            name="正方形2箇所ズーム（横）",
+            description="左右に正方形2箇所を拡大表示",
+            display_position="bottom",
+            regions=[
+                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
+                           x_ratio=0.05, y_ratio=0.25, width_ratio=0.25, height_ratio=0.25,
+                           color=(255, 0, 0), name="左"),
+                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
+                           x_ratio=0.70, y_ratio=0.25, width_ratio=0.25, height_ratio=0.25,
+                           color=(0, 0, 255), name="右"),
+            ]
+        ),
+        CropPreset(
+            name="正方形2箇所ズーム（縦）",
+            description="上下に正方形2箇所を拡大表示",
+            display_position="right",
+            regions=[
+                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
+                           x_ratio=0.3, y_ratio=0.05, width_ratio=0.25, height_ratio=0.25,
+                           color=(255, 0, 0), name="上"),
+                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
+                           x_ratio=0.3, y_ratio=0.70, width_ratio=0.25, height_ratio=0.25,
+                           color=(0, 0, 255), name="下"),
+            ]
+        ),
+        CropPreset(
             name="上下ズーム",
             description="上下の2箇所を拡大表示",
             display_position="right",
