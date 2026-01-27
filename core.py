@@ -86,6 +86,9 @@ class CropRegion:
     width_ratio: Optional[float] = None
     height_ratio: Optional[float] = None
 
+    # 空クロップ: 枠線のみ表示し、拡大画像は表示しない
+    show_zoomed: bool = True
+
 
 @dataclass
 class GapConfig:
@@ -288,6 +291,7 @@ def _parse_crop_region_dict(r: dict, fallback_name: str) -> CropRegion:
         y_ratio=r.get("y_ratio"),
         width_ratio=r.get("width_ratio"),
         height_ratio=r.get("height_ratio"),
+        show_zoomed=r.get("show_zoomed", True),
     )
 
 
@@ -561,6 +565,7 @@ def save_config(config: GridConfig, output_path: str) -> None:
                     "y_ratio": r.y_ratio,
                     "width_ratio": r.width_ratio,
                     "height_ratio": r.height_ratio,
+                    "show_zoomed": r.show_zoomed,
                 }
                 for r in config.crop_regions
             ],
@@ -592,6 +597,7 @@ def save_config(config: GridConfig, output_path: str) -> None:
                             "y_ratio": r.y_ratio,
                             "width_ratio": r.width_ratio,
                             "height_ratio": r.height_ratio,
+                            "show_zoomed": r.show_zoomed,
                         }
                         for r in (o.regions or [])
                     ],
@@ -1175,7 +1181,7 @@ def calculate_flow_row_heights(
 
         row_max_h = 0.0
         for col_idx, image_path in enumerate(row_images):
-            if col_idx >= config.cols or image_path is None:
+            if col_idx >= config.cols or image_path is None or image_path == "__PLACEHOLDER__":
                 continue
 
             min_x, min_y, max_x, max_y = calculate_item_bounds(
@@ -1333,7 +1339,7 @@ def create_grid_presentation(config: GridConfig) -> str:
 
                 for col_idx in range(config.cols):
                     image_path = image_grid[row_idx][col_idx]
-                    if image_path is None:
+                    if image_path is None or image_path == "__PLACEHOLDER__":
                         continue
                     min_x, min_y, max_x, max_y = calculate_item_bounds(
                         config, metrics, image_path, row_idx, col_idx, border_offset_cm
@@ -1359,7 +1365,8 @@ def create_grid_presentation(config: GridConfig) -> str:
                 image_path = image_grid[row_idx][col_idx]
                 this_gap_h = config.gap_h.to_cm(metrics.main_width)
 
-                if image_path is None:
+                # Skip None or placeholder cells
+                if image_path is None or image_path == "__PLACEHOLDER__":
                     if config.layout_mode == "grid":
                         w = (
                             metrics.col_widths[col_idx]
@@ -1517,9 +1524,14 @@ def _add_crop_images(
 ) -> None:
     """Add cropped images next to the main image."""
     disp = config.crop_display
-    num_crops = len(crop_regions)
+    # 空クロップ（show_zoomed=False）はautoの位置計算から除外
+    num_crops = sum(1 for r in crop_regions if r.show_zoomed)
+    visible_crop_idx = 0
 
     for crop_idx, region in enumerate(crop_regions):
+        # 空クロップの場合、拡大画像は描画しない
+        if not region.show_zoomed:
+            continue
         crop_filename = f"crop_{row_idx}_{col_idx}_{crop_idx}.png"
         crop_path = os.path.join(temp_dir, crop_filename)
         try:
@@ -1537,12 +1549,12 @@ def _add_crop_images(
         if region.gap is not None and config.show_zoom_border:
             this_gap_mc += border_offset_cm
 
-        # Calculate position
+        # Calculate position (use visible_crop_idx for auto positioning)
         if disp.position == "right":
             c_left = final_main_left + orig_w + this_gap_mc
             c_top = _calculate_crop_absolute_vertical_position(
                 region,
-                crop_idx,
+                visible_crop_idx,
                 num_crops,
                 final_main_top,
                 orig_h,
@@ -1555,7 +1567,7 @@ def _add_crop_images(
             c_top = final_main_top + orig_h + this_gap_mc
             c_left = _calculate_crop_absolute_horizontal_position(
                 region,
-                crop_idx,
+                visible_crop_idx,
                 num_crops,
                 final_main_left,
                 orig_w,
@@ -1618,6 +1630,8 @@ def _add_crop_images(
                 )
             except Exception:
                 pass  # Skip connector if there's an error
+
+        visible_crop_idx += 1
 
 
 def _resolve_crop_size(

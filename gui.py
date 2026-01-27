@@ -543,6 +543,7 @@ class ImageGridApp:
 
         # Selected region editing
         self.sel_idx = None
+        self._loading_region = False  # Flag to prevent auto-update during load
         self.r_name = tk.StringVar()
         self.r_x = tk.IntVar()
         self.r_y = tk.IntVar()
@@ -552,6 +553,12 @@ class ImageGridApp:
         self.r_align = tk.StringVar(value="auto")
         self.r_offset = tk.DoubleVar(value=0.0)
         self.r_gap = tk.StringVar(value="")
+        self.r_show_zoomed = tk.BooleanVar(value=True)
+
+        # Add trace callbacks for auto-update
+        for var in [self.r_name, self.r_x, self.r_y, self.r_w, self.r_h,
+                    self.r_align, self.r_offset, self.r_gap, self.r_show_zoomed]:
+            var.trace_add("write", self._on_region_detail_change)
 
     def _create_widgets(self):
         """Create all UI widgets."""
@@ -671,6 +678,13 @@ class ImageGridApp:
             side=tk.LEFT, padx=2
         )
         ttk.Button(btn_frame, text="↓下へ", command=self._move_input_down).pack(
+            side=tk.LEFT, padx=2
+        )
+        # 追加機能ボタン
+        ttk.Button(btn_frame, text="複製", command=self._duplicate_input).pack(
+            side=tk.LEFT, padx=2
+        )
+        ttk.Button(btn_frame, text="空セル", command=self._add_placeholder).pack(
             side=tk.LEFT, padx=2
         )
 
@@ -895,6 +909,9 @@ class ImageGridApp:
         ttk.Entry(f_r3, textvariable=self.r_offset, width=5).pack(side=tk.LEFT)
         ttk.Label(f_r3, text="Gap:").pack(side=tk.LEFT)
         ttk.Entry(f_r3, textvariable=self.r_gap, width=5).pack(side=tk.LEFT)
+        ttk.Checkbutton(
+            f_r3, text="拡大表示", variable=self.r_show_zoomed
+        ).pack(side=tk.LEFT, padx=10)
 
         f_r4 = ttk.Frame(f_detail)
         f_r4.pack(fill=tk.X, pady=5)
@@ -1205,16 +1222,25 @@ class ImageGridApp:
             v.trace_add("write", lambda *args: self._schedule_preview())
 
     def _update_region_list(self):
-        """region_tree を更新"""
+        """region_tree を更新（選択状態を保持）"""
+        # Remember current selection
+        current_selection = self.region_tree.selection()
+
         for item in self.region_tree.get_children():
             self.region_tree.delete(item)
         for i, r in enumerate(self.crop_regions):
+            # 座標表示
+            coord = f"({r.x}, {r.y}, {r.width}, {r.height})"
             if r.mode == "ratio":
-                # ratioモードの場合はパーセント表示
-                coord = f"({r.x}, {r.y}, {r.width}, {r.height}) [比率]"
-            else:
-                coord = f"({r.x}, {r.y}, {r.width}, {r.height})"
+                coord += " [比率]"
+            if not r.show_zoomed:
+                coord += " [枠のみ]"
             self.region_tree.insert("", tk.END, iid=str(i), values=(r.name, coord, r.align))
+
+        # Restore selection if still valid
+        for sel_id in current_selection:
+            if sel_id in self.region_tree.get_children():
+                self.region_tree.selection_add(sel_id)
 
     def _add_region_dialog(self):
         """数値入力でクロップ領域を追加"""
@@ -1251,15 +1277,21 @@ class ImageGridApp:
         if 0 <= idx < len(self.crop_regions):
             self.sel_idx = idx
             r = self.crop_regions[idx]
-            self.r_name.set(r.name)
-            self.r_x.set(r.x)
-            self.r_y.set(r.y)
-            self.r_w.set(r.width)
-            self.r_h.set(r.height)
-            self.r_align.set(r.align)
-            self.r_offset.set(r.offset)
-            self.r_gap.set(str(r.gap) if r.gap is not None else "")
-            self.r_color = r.color
+            # Prevent auto-update while loading values
+            self._loading_region = True
+            try:
+                self.r_name.set(r.name)
+                self.r_x.set(r.x)
+                self.r_y.set(r.y)
+                self.r_w.set(r.width)
+                self.r_h.set(r.height)
+                self.r_align.set(r.align)
+                self.r_offset.set(r.offset)
+                self.r_gap.set(str(r.gap) if r.gap is not None else "")
+                self.r_color = r.color
+                self.r_show_zoomed.set(r.show_zoomed)
+            finally:
+                self._loading_region = False
 
     def _pick_region_color(self):
         """領域の色を選択"""
@@ -1513,8 +1545,11 @@ class ImageGridApp:
     def _refresh_input_listbox(self):
         self.folder_listbox.delete(0, tk.END)
         if self.input_mode.get() == "images":
-            for p in self.images:
-                self.folder_listbox.insert(tk.END, p)
+            for i, p in enumerate(self.images):
+                if p == "__PLACEHOLDER__":
+                    self.folder_listbox.insert(tk.END, f"[{i+1}] (空セル)")
+                else:
+                    self.folder_listbox.insert(tk.END, f"[{i+1}] {p}")
         else:
             for p in self.folders:
                 self.folder_listbox.insert(tk.END, p)
@@ -1606,13 +1641,52 @@ class ImageGridApp:
             self._schedule_preview()
             self._save_state()  # Undo/Redo
 
+    def _duplicate_input(self):
+        """選択した画像を複製"""
+        if self.input_mode.get() != "images":
+            messagebox.showinfo("情報", "画像リストモードでのみ使用できます")
+            return
+        sel = self.folder_listbox.curselection()
+        if not sel:
+            messagebox.showwarning("警告", "複製する画像を選択してください")
+            return
+        idx = sel[0]
+        if 0 <= idx < len(self.images):
+            # 選択した画像を直後に挿入
+            self.images.insert(idx + 1, self.images[idx])
+            self._refresh_input_listbox()
+            self.folder_listbox.selection_set(idx + 1)
+            self._schedule_preview()
+            self._save_state()
+
+    def _add_placeholder(self):
+        """空セル（プレースホルダー）を追加"""
+        if self.input_mode.get() != "images":
+            messagebox.showinfo("情報", "画像リストモードでのみ使用できます")
+            return
+        # 選択位置に挿入、なければ末尾に追加
+        sel = self.folder_listbox.curselection()
+        if sel:
+            idx = sel[0] + 1
+            self.images.insert(idx, "__PLACEHOLDER__")
+            self._refresh_input_listbox()
+            self.folder_listbox.selection_set(idx)
+        else:
+            self.images.append("__PLACEHOLDER__")
+            self._refresh_input_listbox()
+            self.folder_listbox.selection_set(len(self.images) - 1)
+        self._schedule_preview()
+        self._save_state()
+
     def _open_crop_editor(self):
         target_img = None
 
-        # NEW: prioritize actual cell images
+        # NEW: prioritize actual cell images (skip placeholders)
         if self.input_mode.get() == "images":
-            if self.images:
-                target_img = self.images[0]
+            for img in self.images:
+                if img and img != "__PLACEHOLDER__":
+                    target_img = img
+                    break
         else:
             for f in self.folders:
                 imgs = get_sorted_images(f)
@@ -1633,7 +1707,11 @@ class ImageGridApp:
         if config.images:
             idx = row * config.cols + col
             if 0 <= idx < len(config.images):
-                return config.images[idx]
+                path = config.images[idx]
+                # プレースホルダーは画像として扱わない
+                if path == "__PLACEHOLDER__":
+                    return None
+                return path
             return None
 
         folders = config.folders or []
@@ -1900,7 +1978,8 @@ class ImageGridApp:
     ):
         """Draw crop region previews on the canvas."""
         disp = config.crop_display
-        num_crops = len(config.crop_regions)
+        # 空クロップ（show_zoomed=False）はautoの位置計算から除外
+        num_crops = sum(1 for r in config.crop_regions if r.show_zoomed)
 
         # ----------------------
         # Step 1: Draw crop source regions on main image
@@ -1963,7 +2042,12 @@ class ImageGridApp:
             actual_gap_mc += border_offset_cm
             actual_gap_cc += border_offset_cm
 
+        visible_crop_idx = 0
         for crop_idx, region in enumerate(config.crop_regions):
+            # 空クロップの場合、拡大表示はスキップ
+            if not region.show_zoomed:
+                continue
+
             # Get crop region aspect ratio
             if region.mode == "ratio":
                 crop_rw = region.width_ratio or 0.1
@@ -2024,21 +2108,21 @@ class ImageGridApp:
                     c_t = main_t + img_h_cm - c_h + region.offset - half_border
                 else:  # auto
                     # 最初と最後のクロップは端に揃える（pin ends）
-                    if crop_idx == 0:
+                    if visible_crop_idx == 0:
                         c_t = main_t
-                    elif num_crops > 1 and crop_idx == num_crops - 1:
+                    elif num_crops > 1 and visible_crop_idx == num_crops - 1:
                         c_t = (main_t + img_h_cm) - c_h
                     else:
                         # 中間のクロップは均等配置
                         if disp.scale is not None or disp.size is not None:
                             total_crop_h = num_crops * c_h + (num_crops - 1) * actual_gap_cc
                             start_y = main_t + (img_h_cm - total_crop_h) / 2
-                            c_t = start_y + crop_idx * (c_h + actual_gap_cc)
+                            c_t = start_y + visible_crop_idx * (c_h + actual_gap_cc)
                         else:
                             single_h = (
                                 img_h_cm - actual_gap_cc * (num_crops - 1)
                             ) / num_crops
-                            slot_top = main_t + crop_idx * (single_h + actual_gap_cc)
+                            slot_top = main_t + visible_crop_idx * (single_h + actual_gap_cc)
                             c_t = slot_top + (single_h - c_h) / 2
             else:  # bottom
                 c_t = main_t + img_h_cm + this_gap_mc
@@ -2051,21 +2135,21 @@ class ImageGridApp:
                     c_l = main_l + img_w_cm - c_w + region.offset - half_border
                 else:  # auto
                     # 最初と最後のクロップは端に揃える（pin ends）
-                    if crop_idx == 0:
+                    if visible_crop_idx == 0:
                         c_l = main_l
-                    elif num_crops > 1 and crop_idx == num_crops - 1:
+                    elif num_crops > 1 and visible_crop_idx == num_crops - 1:
                         c_l = (main_l + img_w_cm) - c_w
                     else:
                         # 中間のクロップは均等配置
                         if disp.scale is not None or disp.size is not None:
                             total_crop_w = num_crops * c_w + (num_crops - 1) * actual_gap_cc
                             start_x = main_l + (img_w_cm - total_crop_w) / 2
-                            c_l = start_x + crop_idx * (c_w + actual_gap_cc)
+                            c_l = start_x + visible_crop_idx * (c_w + actual_gap_cc)
                         else:
                             single_w = (
                                 img_w_cm - actual_gap_cc * (num_crops - 1)
                             ) / num_crops
-                            slot_left = main_l + crop_idx * (single_w + actual_gap_cc)
+                            slot_left = main_l + visible_crop_idx * (single_w + actual_gap_cc)
                             c_l = slot_left + (single_w - c_w) / 2
 
             # Draw crop placeholder (with matching color)
@@ -2094,6 +2178,8 @@ class ImageGridApp:
                     fill=color,
                     font=("Arial", 8, "bold"),
                 )
+
+            visible_crop_idx += 1
 
     # -------------------------------------------------------------------------
     # Preset Methods
@@ -2225,6 +2311,12 @@ class ImageGridApp:
         except Exception as e:
             messagebox.showerror("エラー", f"生成に失敗しました: {e}")
 
+    def _on_region_detail_change(self, *args):
+        """Auto-update when region detail fields change."""
+        if self._loading_region:
+            return
+        self._update_region_detail()
+
     def _update_region_detail(self):
         """選択した領域の詳細を更新"""
         if self.sel_idx is None or self.sel_idx >= len(self.crop_regions):
@@ -2256,6 +2348,8 @@ class ImageGridApp:
                 region.gap = None
         else:
             region.gap = None
+
+        region.show_zoomed = self.r_show_zoomed.get()
 
         self._update_region_list()
         self._schedule_preview()

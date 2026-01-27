@@ -214,30 +214,30 @@ images/
 
 ### 主要項目
 
-| カテゴリ | 項目 | 説明 |
-| ------- | ---- | ---- |
-| `slide` | `width`, `height` | スライドサイズ（cm） |
-| `grid` | `rows`, `cols` | グリッドサイズ |
-| `grid` | `arrangement` | `row` / `col` |
-| `grid` | `layout_mode` | `grid` / `flow` |
-| `grid` | `flow_align` | `left` / `center` / `right` |
-| `grid` | `flow_vertical_align` | `top` / `center` / `bottom` |
-| `margin` | `left`, `top`, `right`, `bottom` | マージン（cm） |
-| `gap` | `horizontal`, `vertical` | 間隔（cm or `{value, mode}`） |
-| `image` | `size_mode` | `fit` / `fixed` |
-| `image` | `fit_mode` | `fit` / `width` / `height` |
-| `image` | `width`, `height` | 固定サイズ時のサイズ |
-| `crop.regions` | - | クロップ領域リスト |
-| `crop` | `rows`, `cols` | 適用セル指定（0-index、`null` は全て） |
-| `crop` | `targets` | 適用セル明示指定（例: `[{row:0,col:1}]`） |
-| `crop` | `overrides` | セル単位のクロップ上書き |
-| `crop.display` | `position` | `right` / `bottom` |
-| `crop.display` | `size`, `scale` | サイズ指定 |
-| `border.crop` | `show`, `width`, `shape` | クロップ枠線設定 |
-| `border.zoom` | `show`, `width`, `shape` | 拡大画像枠線設定 |
-| `folders` | - | 入力フォルダリスト |
-| `images` | - | 画像パス直接指定（row-major） |
-| `output` | - | 出力ファイルパス |
+| カテゴリ       | 項目                             | 説明                                      |
+| -------------- | -------------------------------- | ----------------------------------------- |
+| `slide`        | `width`, `height`                | スライドサイズ（cm）                      |
+| `grid`         | `rows`, `cols`                   | グリッドサイズ                            |
+| `grid`         | `arrangement`                    | `row` / `col`                             |
+| `grid`         | `layout_mode`                    | `grid` / `flow`                           |
+| `grid`         | `flow_align`                     | `left` / `center` / `right`               |
+| `grid`         | `flow_vertical_align`            | `top` / `center` / `bottom`               |
+| `margin`       | `left`, `top`, `right`, `bottom` | マージン（cm）                            |
+| `gap`          | `horizontal`, `vertical`         | 間隔（cm or `{value, mode}`）             |
+| `image`        | `size_mode`                      | `fit` / `fixed`                           |
+| `image`        | `fit_mode`                       | `fit` / `width` / `height`                |
+| `image`        | `width`, `height`                | 固定サイズ時のサイズ                      |
+| `crop.regions` | -                                | クロップ領域リスト                        |
+| `crop`         | `rows`, `cols`                   | 適用セル指定（0-index、`null` は全て）    |
+| `crop`         | `targets`                        | 適用セル明示指定（例: `[{row:0,col:1}]`） |
+| `crop`         | `overrides`                      | セル単位のクロップ上書き                  |
+| `crop.display` | `position`                       | `right` / `bottom`                        |
+| `crop.display` | `size`, `scale`                  | サイズ指定                                |
+| `border.crop`  | `show`, `width`, `shape`         | クロップ枠線設定                          |
+| `border.zoom`  | `show`, `width`, `shape`         | 拡大画像枠線設定                          |
+| `folders`      | -                                | 入力フォルダリスト                        |
+| `images`       | -                                | 画像パス直接指定（row-major）             |
+| `output`       | -                                | 出力ファイルパス                          |
 
 ---
 
@@ -326,6 +326,11 @@ save() → output.pptx を生成
 2. **マルチスライド対応**
    - 画像数がグリッドを超える場合、自動的に複数スライドに分割
    - ページ送り設定（rows × cols × pages）
+
+3. **空クロップ機能**
+   - クロップはしないが矩形を画像上に追加する機能
+   - クロップ画像を表示するか否かを選択できるようにする
+   - ただし，空クロップを選択した際は(auto)などのアルゴリズムに関与しないようにする（つまり，クロップ画像としてカウントしないように）
 
 ### 優先度: 中
 
