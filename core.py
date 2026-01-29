@@ -1161,9 +1161,9 @@ def _calculate_crop_horizontal_position(
                 return start_x + crop_idx * (cw + actual_gap_cc)
             else:
                 # fit時: スロットの中央に配置
-                sw = (orig_w - actual_gap_cc * (num_crops - 1)) / num_crops
-                slot_left = crop_idx * (sw + actual_gap_cc)
-                return slot_left + (sw - cw) / 2
+                single_w = (orig_w - actual_gap_cc * (num_crops - 1)) / num_crops
+                slot_left = crop_idx * (single_w + actual_gap_cc)
+                return slot_left + (single_w - cw) / 2
 
 
 def calculate_flow_row_heights(
@@ -1181,7 +1181,11 @@ def calculate_flow_row_heights(
 
         row_max_h = 0.0
         for col_idx, image_path in enumerate(row_images):
-            if col_idx >= config.cols or image_path is None or image_path == "__PLACEHOLDER__":
+            if (
+                col_idx >= config.cols
+                or image_path is None
+                or image_path == "__PLACEHOLDER__"
+            ):
                 continue
 
             min_x, min_y, max_x, max_y = calculate_item_bounds(
@@ -1193,6 +1197,25 @@ def calculate_flow_row_heights(
         row_heights.append(row_max_h if row_max_h > 0 else metrics.main_height)
 
     return row_heights
+
+
+def _placeholder_override_size(
+    config: GridConfig, metrics: LayoutMetrics
+) -> Tuple[float, float]:
+    """空セル(プレースホルダー)用の仮サイズ(cm)。
+
+    flow レイアウトで空セルを「セル1つ分」として幅・高さ計算に含めるために使う。
+    """
+    if (
+        config.size_mode == "fixed"
+        and config.image_width is not None
+        and config.image_height is not None
+        and config.image_width > 0
+        and config.image_height > 0
+    ):
+        return float(config.image_width), float(config.image_height)
+
+    return float(metrics.main_width), float(metrics.main_height)
 
 
 # =============================================================================
@@ -1339,11 +1362,29 @@ def create_grid_presentation(config: GridConfig) -> str:
 
                 for col_idx in range(config.cols):
                     image_path = image_grid[row_idx][col_idx]
+
+                    # 空セルも「セル1つ分」として幅計算に含める
                     if image_path is None or image_path == "__PLACEHOLDER__":
-                        continue
-                    min_x, min_y, max_x, max_y = calculate_item_bounds(
-                        config, metrics, image_path, row_idx, col_idx, border_offset_cm
-                    )
+                        ow, oh = _placeholder_override_size(config, metrics)
+                        min_x, min_y, max_x, max_y = calculate_item_bounds(
+                            config,
+                            metrics,
+                            "dummy",
+                            row_idx,
+                            col_idx,
+                            border_offset_cm,
+                            override_size=(ow, oh),
+                        )
+                    else:
+                        min_x, min_y, max_x, max_y = calculate_item_bounds(
+                            config,
+                            metrics,
+                            image_path,
+                            row_idx,
+                            col_idx,
+                            border_offset_cm,
+                        )
+
                     row_total_content_width += max_x - min_x
                     valid_items += 1
 
@@ -1365,7 +1406,7 @@ def create_grid_presentation(config: GridConfig) -> str:
                 image_path = image_grid[row_idx][col_idx]
                 this_gap_h = config.gap_h.to_cm(metrics.main_width)
 
-                # Skip None or placeholder cells
+                # Skip None or placeholder cells (ただし flow では幅だけは確保する)
                 if image_path is None or image_path == "__PLACEHOLDER__":
                     if config.layout_mode == "grid":
                         w = (
@@ -1374,6 +1415,19 @@ def create_grid_presentation(config: GridConfig) -> str:
                             else metrics.main_width
                         )
                         current_x += w + this_gap_h
+                    else:  # flow
+                        ow, oh = _placeholder_override_size(config, metrics)
+                        min_x, min_y, max_x, max_y = calculate_item_bounds(
+                            config,
+                            metrics,
+                            "dummy",
+                            row_idx,
+                            col_idx,
+                            border_offset_cm,
+                            override_size=(ow, oh),
+                        )
+                        item_w = max_x - min_x
+                        current_x += item_w + this_gap_h
                     continue
 
                 crop_regions = get_crop_regions_for_cell(row_idx, col_idx, config)
@@ -1464,7 +1518,9 @@ def create_grid_presentation(config: GridConfig) -> str:
 
                 # Add text label if enabled
                 if config.label_config.enabled:
-                    label_text = generate_label_text(config, image_path, row_idx, col_idx)
+                    label_text = generate_label_text(
+                        config, image_path, row_idx, col_idx
+                    )
                     if label_text:
                         label_h = calculate_label_height(config.label_config)
                         label_gap = config.label_config.gap
@@ -1615,16 +1671,24 @@ def _add_crop_images(
 
                 # Calculate connector points
                 (start_x, start_y), (end_x, end_y) = calculate_connector_points(
-                    border_left, border_top, border_w, border_h,
-                    c_left, c_top, cw, ch,
+                    border_left,
+                    border_top,
+                    border_w,
+                    border_h,
+                    c_left,
+                    c_top,
+                    cw,
+                    ch,
                     disp.position,
                 )
 
                 # Draw connector line
                 add_connector_line(
                     slide,
-                    start_x, start_y,
-                    end_x, end_y,
+                    start_x,
+                    start_y,
+                    end_x,
+                    end_y,
                     config.connector,
                     region.color,
                 )
@@ -2015,113 +2079,303 @@ def get_default_presets() -> List[CropPreset]:
             description="左右の2箇所を拡大表示",
             display_position="bottom",
             regions=[
-                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
-                           x_ratio=0.05, y_ratio=0.25, width_ratio=0.25, height_ratio=0.5,
-                           color=(255, 0, 0), name="左"),
-                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
-                           x_ratio=0.70, y_ratio=0.25, width_ratio=0.25, height_ratio=0.5,
-                           color=(0, 0, 255), name="右"),
-            ]
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.05,
+                    y_ratio=0.25,
+                    width_ratio=0.25,
+                    height_ratio=0.5,
+                    color=(255, 0, 0),
+                    name="左",
+                ),
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.70,
+                    y_ratio=0.25,
+                    width_ratio=0.25,
+                    height_ratio=0.5,
+                    color=(0, 0, 255),
+                    name="右",
+                ),
+            ],
         ),
         CropPreset(
             name="正方形2箇所ズーム（横）",
             description="左右に正方形2箇所を拡大表示",
             display_position="bottom",
             regions=[
-                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
-                           x_ratio=0.05, y_ratio=0.25, width_ratio=0.25, height_ratio=0.25,
-                           color=(255, 0, 0), name="左"),
-                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
-                           x_ratio=0.70, y_ratio=0.25, width_ratio=0.25, height_ratio=0.25,
-                           color=(0, 0, 255), name="右"),
-            ]
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.05,
+                    y_ratio=0.25,
+                    width_ratio=0.25,
+                    height_ratio=0.25,
+                    color=(255, 0, 0),
+                    name="左",
+                ),
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.70,
+                    y_ratio=0.25,
+                    width_ratio=0.25,
+                    height_ratio=0.25,
+                    color=(0, 0, 255),
+                    name="右",
+                ),
+            ],
         ),
         CropPreset(
             name="正方形2箇所ズーム（縦）",
             description="上下に正方形2箇所を拡大表示",
             display_position="right",
             regions=[
-                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
-                           x_ratio=0.3, y_ratio=0.05, width_ratio=0.25, height_ratio=0.25,
-                           color=(255, 0, 0), name="上"),
-                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
-                           x_ratio=0.3, y_ratio=0.70, width_ratio=0.25, height_ratio=0.25,
-                           color=(0, 0, 255), name="下"),
-            ]
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.3,
+                    y_ratio=0.05,
+                    width_ratio=0.25,
+                    height_ratio=0.25,
+                    color=(255, 0, 0),
+                    name="上",
+                ),
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.3,
+                    y_ratio=0.70,
+                    width_ratio=0.25,
+                    height_ratio=0.25,
+                    color=(0, 0, 255),
+                    name="下",
+                ),
+            ],
         ),
         CropPreset(
             name="上下ズーム",
             description="上下の2箇所を拡大表示",
             display_position="right",
             regions=[
-                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
-                           x_ratio=0.25, y_ratio=0.05, width_ratio=0.5, height_ratio=0.25,
-                           color=(255, 0, 0), name="上"),
-                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
-                           x_ratio=0.25, y_ratio=0.70, width_ratio=0.5, height_ratio=0.25,
-                           color=(0, 0, 255), name="下"),
-            ]
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.25,
+                    y_ratio=0.05,
+                    width_ratio=0.5,
+                    height_ratio=0.25,
+                    color=(255, 0, 0),
+                    name="上",
+                ),
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.25,
+                    y_ratio=0.70,
+                    width_ratio=0.5,
+                    height_ratio=0.25,
+                    color=(0, 0, 255),
+                    name="下",
+                ),
+            ],
         ),
         CropPreset(
             name="4隅ズーム",
             description="4隅を拡大表示",
             display_position="bottom",
             regions=[
-                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
-                           x_ratio=0.0, y_ratio=0.0, width_ratio=0.2, height_ratio=0.2,
-                           color=(255, 0, 0), name="左上"),
-                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
-                           x_ratio=0.8, y_ratio=0.0, width_ratio=0.2, height_ratio=0.2,
-                           color=(0, 255, 0), name="右上"),
-                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
-                           x_ratio=0.0, y_ratio=0.8, width_ratio=0.2, height_ratio=0.2,
-                           color=(0, 0, 255), name="左下"),
-                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
-                           x_ratio=0.8, y_ratio=0.8, width_ratio=0.2, height_ratio=0.2,
-                           color=(255, 255, 0), name="右下"),
-            ]
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.0,
+                    y_ratio=0.0,
+                    width_ratio=0.2,
+                    height_ratio=0.2,
+                    color=(255, 0, 0),
+                    name="左上",
+                ),
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.8,
+                    y_ratio=0.0,
+                    width_ratio=0.2,
+                    height_ratio=0.2,
+                    color=(0, 255, 0),
+                    name="右上",
+                ),
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.0,
+                    y_ratio=0.8,
+                    width_ratio=0.2,
+                    height_ratio=0.2,
+                    color=(0, 0, 255),
+                    name="左下",
+                ),
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.8,
+                    y_ratio=0.8,
+                    width_ratio=0.2,
+                    height_ratio=0.2,
+                    color=(255, 255, 0),
+                    name="右下",
+                ),
+            ],
         ),
         CropPreset(
             name="中央ズーム",
             description="中央部分を拡大表示",
             display_position="right",
             regions=[
-                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
-                           x_ratio=0.35, y_ratio=0.35, width_ratio=0.3, height_ratio=0.3,
-                           color=(255, 0, 0), name="中央"),
-            ]
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.35,
+                    y_ratio=0.35,
+                    width_ratio=0.3,
+                    height_ratio=0.3,
+                    color=(255, 0, 0),
+                    name="中央",
+                ),
+            ],
         ),
         CropPreset(
             name="中央＋4隅ズーム",
             description="中央と4隅を拡大表示",
             display_position="bottom",
             regions=[
-                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
-                           x_ratio=0.0, y_ratio=0.0, width_ratio=0.15, height_ratio=0.15,
-                           color=(255, 0, 0), name="左上"),
-                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
-                           x_ratio=0.425, y_ratio=0.425, width_ratio=0.15, height_ratio=0.15,
-                           color=(0, 255, 0), name="中央"),
-                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
-                           x_ratio=0.85, y_ratio=0.85, width_ratio=0.15, height_ratio=0.15,
-                           color=(0, 0, 255), name="右下"),
-            ]
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.0,
+                    y_ratio=0.0,
+                    width_ratio=0.15,
+                    height_ratio=0.15,
+                    color=(255, 0, 0),
+                    name="左上",
+                ),
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.425,
+                    y_ratio=0.425,
+                    width_ratio=0.15,
+                    height_ratio=0.15,
+                    color=(0, 255, 0),
+                    name="中央",
+                ),
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.85,
+                    y_ratio=0.85,
+                    width_ratio=0.15,
+                    height_ratio=0.15,
+                    color=(0, 0, 255),
+                    name="右下",
+                ),
+            ],
         ),
         CropPreset(
             name="横3箇所ズーム",
             description="横に3箇所を拡大表示",
             display_position="bottom",
             regions=[
-                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
-                           x_ratio=0.05, y_ratio=0.3, width_ratio=0.2, height_ratio=0.4,
-                           color=(255, 0, 0), name="左"),
-                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
-                           x_ratio=0.4, y_ratio=0.3, width_ratio=0.2, height_ratio=0.4,
-                           color=(0, 255, 0), name="中"),
-                CropRegion(x=0, y=0, width=100, height=100, mode="ratio",
-                           x_ratio=0.75, y_ratio=0.3, width_ratio=0.2, height_ratio=0.4,
-                           color=(0, 0, 255), name="右"),
-            ]
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.05,
+                    y_ratio=0.3,
+                    width_ratio=0.2,
+                    height_ratio=0.4,
+                    color=(255, 0, 0),
+                    name="左",
+                ),
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.4,
+                    y_ratio=0.3,
+                    width_ratio=0.2,
+                    height_ratio=0.4,
+                    color=(0, 255, 0),
+                    name="中",
+                ),
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.75,
+                    y_ratio=0.3,
+                    width_ratio=0.2,
+                    height_ratio=0.4,
+                    color=(0, 0, 255),
+                    name="右",
+                ),
+            ],
         ),
     ]
 
@@ -2135,19 +2389,21 @@ def load_crop_presets(filepath: Optional[str] = None) -> List[CropPreset]:
 
     if Path(filepath).exists():
         try:
-            with open(filepath, 'r', encoding='utf-8') as f:
+            with open(filepath, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f)
-            if data and 'presets' in data:
-                for p in data['presets']:
+            if data and "presets" in data:
+                for p in data["presets"]:
                     regions = []
-                    for i, r in enumerate(p.get('regions', [])):
+                    for i, r in enumerate(p.get("regions", [])):
                         regions.append(_parse_crop_region_dict(r, f"preset_{i}"))
-                    presets.append(CropPreset(
-                        name=p.get('name', 'Unknown'),
-                        regions=regions,
-                        description=p.get('description', ''),
-                        display_position=p.get('display_position', 'right')
-                    ))
+                    presets.append(
+                        CropPreset(
+                            name=p.get("name", "Unknown"),
+                            regions=regions,
+                            description=p.get("description", ""),
+                            display_position=p.get("display_position", "right"),
+                        )
+                    )
         except Exception:
             pass  # ファイル読み込みエラーは無視
 
@@ -2163,33 +2419,42 @@ def save_crop_preset(preset: CropPreset, filepath: Optional[str] = None) -> None
     presets_data: List[dict] = []
     if Path(filepath).exists():
         try:
-            with open(filepath, 'r', encoding='utf-8') as f:
+            with open(filepath, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
-            presets_data = data.get('presets', [])
+            presets_data = data.get("presets", [])
         except Exception:
             pass
 
     # 同名のプリセットがあれば上書き
-    presets_data = [p for p in presets_data if p.get('name') != preset.name]
+    presets_data = [p for p in presets_data if p.get("name") != preset.name]
 
     # 新しいプリセットを追加
-    presets_data.append({
-        'name': preset.name,
-        'description': preset.description,
-        'display_position': preset.display_position,
-        'regions': [
-            {
-                'name': r.name,
-                'x': r.x, 'y': r.y, 'width': r.width, 'height': r.height,
-                'color': list(r.color),
-                'align': r.align, 'offset': r.offset, 'gap': r.gap,
-                'mode': r.mode,
-                'x_ratio': r.x_ratio, 'y_ratio': r.y_ratio,
-                'width_ratio': r.width_ratio, 'height_ratio': r.height_ratio,
-            }
-            for r in preset.regions
-        ]
-    })
+    presets_data.append(
+        {
+            "name": preset.name,
+            "description": preset.description,
+            "display_position": preset.display_position,
+            "regions": [
+                {
+                    "name": r.name,
+                    "x": r.x,
+                    "y": r.y,
+                    "width": r.width,
+                    "height": r.height,
+                    "color": list(r.color),
+                    "align": r.align,
+                    "offset": r.offset,
+                    "gap": r.gap,
+                    "mode": r.mode,
+                    "x_ratio": r.x_ratio,
+                    "y_ratio": r.y_ratio,
+                    "width_ratio": r.width_ratio,
+                    "height_ratio": r.height_ratio,
+                }
+                for r in preset.regions
+            ],
+        }
+    )
 
-    with open(filepath, 'w', encoding='utf-8') as f:
-        yaml.dump({'presets': presets_data}, f, allow_unicode=True)
+    with open(filepath, "w", encoding="utf-8") as f:
+        yaml.dump({"presets": presets_data}, f, allow_unicode=True)
