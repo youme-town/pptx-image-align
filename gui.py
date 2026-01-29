@@ -642,7 +642,7 @@ class ImageGridApp:
 
         ttk.Label(
             self.right_frame,
-            text="リアルタイムプレビュー",
+            text="プレビュー",
             font=("Helvetica", 12, "bold"),
         ).pack(pady=5)
 
@@ -2064,7 +2064,7 @@ class ImageGridApp:
                 )
 
                 # Draw crop placeholders
-                if has_crops and config.crop_regions:
+                if (not is_empty) and has_crops and config.crop_regions:
                     self._draw_crop_previews(
                         canvas,
                         config,
