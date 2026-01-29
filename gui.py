@@ -34,8 +34,6 @@ from core import (
     GridConfig,
     GapConfig,
     CropRegion,
-    CropDisplayConfig,
-    LayoutMetrics,
     CropPreset,
     LabelConfig,
     ConnectorConfig,
@@ -61,6 +59,7 @@ from core import (
 @dataclass
 class AppState:
     """アプリケーション状態のスナップショット"""
+
     folders: List[str] = field(default_factory=list)
     images: List[str] = field(default_factory=list)
     crop_regions: List[CropRegion] = field(default_factory=list)
@@ -141,13 +140,19 @@ class CropEditor(tk.Toplevel):
         self.canvas.pack(fill=tk.BOTH, expand=True)
 
         # Right: Preview panel
-        self.preview_frame = ttk.LabelFrame(self.main_frame, text="クロップ領域プレビュー", padding=5)
+        self.preview_frame = ttk.LabelFrame(
+            self.main_frame, text="クロップ領域プレビュー", padding=5
+        )
         self.preview_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=5, pady=5)
 
-        self.preview_canvas = tk.Canvas(self.preview_frame, bg="white", width=200, height=200)
+        self.preview_canvas = tk.Canvas(
+            self.preview_frame, bg="white", width=200, height=200
+        )
         self.preview_canvas.pack(fill=tk.BOTH, expand=True)
 
-        self.preview_label = ttk.Label(self.preview_frame, text="領域を選択してください", wraplength=190)
+        self.preview_label = ttk.Label(
+            self.preview_frame, text="領域を選択してください", wraplength=190
+        )
         self.preview_label.pack(pady=5)
 
         self.bottom_frame = ttk.Frame(self, padding=5)
@@ -225,11 +230,11 @@ class CropEditor(tk.Toplevel):
                 rw = (region.width_ratio or 0) * self.orig_w
                 rh = (region.height_ratio or 0) * self.orig_h
             else:
-                # px mode - use x, y, width, height as ratio of 1000
-                rx = (region.x / 1000.0) * self.orig_w
-                ry = (region.y / 1000.0) * self.orig_h
-                rw = (region.width / 1000.0) * self.orig_w
-                rh = (region.height / 1000.0) * self.orig_h
+                # px mode - treat x/y/width/height as actual pixels (core.resolve_crop_box と同じ解釈)
+                rx = region.x
+                ry = region.y
+                rw = region.width
+                rh = region.height
 
             # Convert to display coordinates
             sx = rx * self.display_scale + self.off_x
@@ -244,10 +249,11 @@ class CropEditor(tk.Toplevel):
             # Draw region name
             if region.name:
                 self.canvas.create_text(
-                    (sx + ex) / 2, (sy + ey) / 2,
+                    (sx + ex) / 2,
+                    (sy + ey) / 2,
                     text=region.name,
                     fill=color,
-                    font=("Arial", 9, "bold")
+                    font=("Arial", 9, "bold"),
                 )
 
         # Redraw current selection rect if present
@@ -276,6 +282,8 @@ class CropEditor(tk.Toplevel):
         )
 
     def on_drag(self, event):
+        if self.rect_id is None or self.start_x is None or self.start_y is None:
+            return
         self.canvas.coords(self.rect_id, self.start_x, self.start_y, event.x, event.y)
 
         # リアルタイムでプレビューを更新（負荷軽減のため一時的な矩形を計算）
@@ -297,6 +305,8 @@ class CropEditor(tk.Toplevel):
             self._update_crop_preview()
 
     def on_release(self, event):
+        if self.start_x is None or self.start_y is None:
+            return
         end_x, end_y = event.x, event.y
 
         # Normalize to image coords
@@ -347,13 +357,15 @@ class CropEditor(tk.Toplevel):
         self.preview_canvas.delete("all")
         cx = preview_w // 2
         cy = preview_h // 2
-        self.preview_canvas.create_image(cx, cy, anchor=tk.CENTER, image=self.preview_tk_img)
+        self.preview_canvas.create_image(
+            cx, cy, anchor=tk.CENTER, image=self.preview_tk_img
+        )
 
         # 情報ラベルを更新
         self.preview_label.config(
             text=f"サイズ: {w} x {h} px\n"
-                 f"位置: ({x}, {y})\n"
-                 f"比率: {w/self.orig_w:.1%} x {h/self.orig_h:.1%}"
+            f"位置: ({x}, {y})\n"
+            f"比率: {w / self.orig_w:.1%} x {h / self.orig_h:.1%}"
         )
 
     def on_save(self):
@@ -402,9 +414,9 @@ class ImageGridApp:
 
     def _bind_keyboard_shortcuts(self):
         """キーボードショートカットをバインド"""
-        self.root.bind('<Control-z>', lambda e: self._undo())
-        self.root.bind('<Control-y>', lambda e: self._redo())
-        self.root.bind('<Control-Z>', lambda e: self._redo())  # Ctrl+Shift+Z
+        self.root.bind("<Control-z>", lambda e: self._undo())
+        self.root.bind("<Control-y>", lambda e: self._redo())
+        self.root.bind("<Control-Z>", lambda e: self._redo())  # Ctrl+Shift+Z
 
     def _get_current_state(self) -> AppState:
         """現在の状態をスナップショットとして取得"""
@@ -555,9 +567,21 @@ class ImageGridApp:
         self.r_gap = tk.StringVar(value="")
         self.r_show_zoomed = tk.BooleanVar(value=True)
 
+        # Cache for image dimensions used by preview rendering
+        self._image_dim_cache: Dict[str, Tuple[int, int]] = {}
+
         # Add trace callbacks for auto-update
-        for var in [self.r_name, self.r_x, self.r_y, self.r_w, self.r_h,
-                    self.r_align, self.r_offset, self.r_gap, self.r_show_zoomed]:
+        for var in [
+            self.r_name,
+            self.r_x,
+            self.r_y,
+            self.r_w,
+            self.r_h,
+            self.r_align,
+            self.r_offset,
+            self.r_gap,
+            self.r_show_zoomed,
+        ]:
             var.trace_add("write", self._on_region_detail_change)
 
     def _create_widgets(self):
@@ -751,20 +775,30 @@ class ImageGridApp:
         )
 
         # Template settings
-        f_tpl = ttk.LabelFrame(self.tab_layout, text="テンプレートPPTX (オプション)", padding=5)
+        f_tpl = ttk.LabelFrame(
+            self.tab_layout, text="テンプレートPPTX (オプション)", padding=5
+        )
         f_tpl.pack(fill=tk.X, pady=5)
 
         f_tpl_row1 = ttk.Frame(f_tpl)
         f_tpl_row1.pack(fill=tk.X)
         ttk.Label(f_tpl_row1, text="テンプレート:").pack(side=tk.LEFT)
-        ttk.Entry(f_tpl_row1, textvariable=self.template_path, width=30).pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-        ttk.Button(f_tpl_row1, text="参照", command=self._browse_template).pack(side=tk.LEFT, padx=2)
-        ttk.Button(f_tpl_row1, text="クリア", command=lambda: self.template_path.set("")).pack(side=tk.LEFT, padx=2)
+        ttk.Entry(f_tpl_row1, textvariable=self.template_path, width=30).pack(
+            side=tk.LEFT, padx=5, fill=tk.X, expand=True
+        )
+        ttk.Button(f_tpl_row1, text="参照", command=self._browse_template).pack(
+            side=tk.LEFT, padx=2
+        )
+        ttk.Button(
+            f_tpl_row1, text="クリア", command=lambda: self.template_path.set("")
+        ).pack(side=tk.LEFT, padx=2)
 
         f_tpl_row2 = ttk.Frame(f_tpl)
         f_tpl_row2.pack(fill=tk.X, pady=2)
         ttk.Label(f_tpl_row2, text="レイアウト番号:").pack(side=tk.LEFT)
-        ttk.Entry(f_tpl_row2, textvariable=self.slide_layout_index, width=5).pack(side=tk.LEFT, padx=5)
+        ttk.Entry(f_tpl_row2, textvariable=self.slide_layout_index, width=5).pack(
+            side=tk.LEFT, padx=5
+        )
         ttk.Label(f_tpl_row2, text="(0=タイトル, 6=白紙)").pack(side=tk.LEFT)
 
         # Margins
@@ -837,11 +871,17 @@ class ImageGridApp:
         f_preset.pack(fill=tk.X, pady=5)
 
         self.preset_var = tk.StringVar()
-        self.preset_combo = ttk.Combobox(f_preset, textvariable=self.preset_var, state="readonly", width=20)
+        self.preset_combo = ttk.Combobox(
+            f_preset, textvariable=self.preset_var, state="readonly", width=20
+        )
         self.preset_combo.pack(side=tk.LEFT, padx=5)
 
-        ttk.Button(f_preset, text="読込", command=self._load_preset).pack(side=tk.LEFT, padx=2)
-        ttk.Button(f_preset, text="現在の設定を保存", command=self._save_preset_dialog).pack(side=tk.LEFT, padx=2)
+        ttk.Button(f_preset, text="読込", command=self._load_preset).pack(
+            side=tk.LEFT, padx=2
+        )
+        ttk.Button(
+            f_preset, text="現在の設定を保存", command=self._save_preset_dialog
+        ).pack(side=tk.LEFT, padx=2)
 
         self._refresh_preset_list()
 
@@ -909,9 +949,9 @@ class ImageGridApp:
         ttk.Entry(f_r3, textvariable=self.r_offset, width=5).pack(side=tk.LEFT)
         ttk.Label(f_r3, text="Gap:").pack(side=tk.LEFT)
         ttk.Entry(f_r3, textvariable=self.r_gap, width=5).pack(side=tk.LEFT)
-        ttk.Checkbutton(
-            f_r3, text="拡大表示", variable=self.r_show_zoomed
-        ).pack(side=tk.LEFT, padx=10)
+        ttk.Checkbutton(f_r3, text="拡大表示", variable=self.r_show_zoomed).pack(
+            side=tk.LEFT, padx=10
+        )
 
         f_r4 = ttk.Frame(f_detail)
         f_r4.pack(fill=tk.X, pady=5)
@@ -1045,7 +1085,9 @@ class ImageGridApp:
         ).pack(side=tk.LEFT, padx=5)
 
         # Label settings
-        f_label = ttk.LabelFrame(self.tab_style, text="テキストラベル/キャプション", padding=5)
+        f_label = ttk.LabelFrame(
+            self.tab_style, text="テキストラベル/キャプション", padding=5
+        )
         f_label.pack(fill=tk.X, pady=5)
 
         # Enable/disable
@@ -1086,10 +1128,16 @@ class ImageGridApp:
         f_lbl_row4 = ttk.Frame(f_label)
         f_lbl_row4.pack(fill=tk.X, pady=2)
         ttk.Label(f_lbl_row4, text="フォント:").pack(side=tk.LEFT)
-        ttk.Entry(f_lbl_row4, textvariable=self.label_font_name, width=12).pack(side=tk.LEFT, padx=2)
+        ttk.Entry(f_lbl_row4, textvariable=self.label_font_name, width=12).pack(
+            side=tk.LEFT, padx=2
+        )
         ttk.Label(f_lbl_row4, text="サイズ(pt):").pack(side=tk.LEFT, padx=(5, 2))
-        ttk.Entry(f_lbl_row4, textvariable=self.label_font_size, width=5).pack(side=tk.LEFT)
-        ttk.Checkbutton(f_lbl_row4, text="太字", variable=self.label_font_bold).pack(side=tk.LEFT, padx=5)
+        ttk.Entry(f_lbl_row4, textvariable=self.label_font_size, width=5).pack(
+            side=tk.LEFT
+        )
+        ttk.Checkbutton(f_lbl_row4, text="太字", variable=self.label_font_bold).pack(
+            side=tk.LEFT, padx=5
+        )
         self.btn_label_color = tk.Button(
             f_lbl_row4, text="色", width=4, command=self._pick_label_color
         )
@@ -1099,14 +1147,20 @@ class ImageGridApp:
         f_lbl_row5 = ttk.Frame(f_label)
         f_lbl_row5.pack(fill=tk.X, pady=2)
         ttk.Label(f_lbl_row5, text="連番フォーマット:").pack(side=tk.LEFT)
-        ttk.Entry(f_lbl_row5, textvariable=self.label_number_format, width=10).pack(side=tk.LEFT, padx=2)
+        ttk.Entry(f_lbl_row5, textvariable=self.label_number_format, width=10).pack(
+            side=tk.LEFT, padx=2
+        )
         ttk.Label(f_lbl_row5, text="({n}で番号)").pack(side=tk.LEFT)
 
         # Custom texts
         f_lbl_row6 = ttk.Frame(f_label)
         f_lbl_row6.pack(fill=tk.X, pady=2)
-        ttk.Label(f_lbl_row6, text="カスタムテキスト (カンマ区切り):").pack(side=tk.LEFT)
-        ttk.Entry(f_lbl_row6, textvariable=self.label_custom_texts, width=30).pack(side=tk.LEFT, padx=2, fill=tk.X, expand=True)
+        ttk.Label(f_lbl_row6, text="カスタムテキスト (カンマ区切り):").pack(
+            side=tk.LEFT
+        )
+        ttk.Entry(f_lbl_row6, textvariable=self.label_custom_texts, width=30).pack(
+            side=tk.LEFT, padx=2, fill=tk.X, expand=True
+        )
 
         # Connector settings
         f_conn = ttk.LabelFrame(self.tab_style, text="クロップ連結線", padding=5)
@@ -1119,7 +1173,9 @@ class ImageGridApp:
             f_conn_row1, text="連結線を表示", variable=self.connector_show
         ).pack(side=tk.LEFT)
         ttk.Label(f_conn_row1, text="太さ(pt):").pack(side=tk.LEFT, padx=(10, 2))
-        ttk.Entry(f_conn_row1, textvariable=self.connector_width, width=5).pack(side=tk.LEFT)
+        ttk.Entry(f_conn_row1, textvariable=self.connector_width, width=5).pack(
+            side=tk.LEFT
+        )
 
         # Style options
         f_conn_row2 = ttk.Frame(f_conn)
@@ -1140,7 +1196,11 @@ class ImageGridApp:
         init_color = f"#{self.label_font_color[0]:02x}{self.label_font_color[1]:02x}{self.label_font_color[2]:02x}"
         color = colorchooser.askcolor(initialcolor=init_color)
         if color[0]:
-            self.label_font_color = (int(color[0][0]), int(color[0][1]), int(color[0][2]))
+            self.label_font_color = (
+                int(color[0][0]),
+                int(color[0][1]),
+                int(color[0][2]),
+            )
             self._schedule_preview()
 
     def _browse_template(self):
@@ -1235,7 +1295,9 @@ class ImageGridApp:
                 coord += " [比率]"
             if not r.show_zoomed:
                 coord += " [枠のみ]"
-            self.region_tree.insert("", tk.END, iid=str(i), values=(r.name, coord, r.align))
+            self.region_tree.insert(
+                "", tk.END, iid=str(i), values=(r.name, coord, r.align)
+            )
 
         # Restore selection if still valid
         for sel_id in current_selection:
@@ -1245,10 +1307,15 @@ class ImageGridApp:
     def _add_region_dialog(self):
         """数値入力でクロップ領域を追加"""
         from tkinter import simpledialog
-        name = simpledialog.askstring("領域追加", "領域名:", initialvalue=f"Region_{len(self.crop_regions) + 1}")
+
+        name = simpledialog.askstring(
+            "領域追加", "領域名:", initialvalue=f"Region_{len(self.crop_regions) + 1}"
+        )
         if not name:
             return
-        region = CropRegion(x=0, y=0, width=100, height=100, color=(255, 0, 0), name=name)
+        region = CropRegion(
+            x=0, y=0, width=100, height=100, color=(255, 0, 0), name=name
+        )
         self.crop_regions.append(region)
         self._update_region_list()
         self._schedule_preview()
@@ -1416,7 +1483,9 @@ class ImageGridApp:
             font_color=self.label_font_color,
             font_bold=self.label_font_bold.get(),
             number_format=self.label_number_format.get(),
-            custom_texts=[t.strip() for t in self.label_custom_texts.get().split(",") if t.strip()],
+            custom_texts=[
+                t.strip() for t in self.label_custom_texts.get().split(",") if t.strip()
+            ],
             gap=self._get_safe_double(self.label_gap, 0.1),
         )
 
@@ -1547,9 +1616,9 @@ class ImageGridApp:
         if self.input_mode.get() == "images":
             for i, p in enumerate(self.images):
                 if p == "__PLACEHOLDER__":
-                    self.folder_listbox.insert(tk.END, f"[{i+1}] (空セル)")
+                    self.folder_listbox.insert(tk.END, f"[{i + 1}] (空セル)")
                 else:
-                    self.folder_listbox.insert(tk.END, f"[{i+1}] {p}")
+                    self.folder_listbox.insert(tk.END, f"[{i + 1}] {p}")
         else:
             for p in self.folders:
                 self.folder_listbox.insert(tk.END, p)
@@ -1700,7 +1769,9 @@ class ImageGridApp:
             )
 
         if target_img:
-            CropEditor(self.root, target_img, self._add_region_from_editor, self.crop_regions)
+            CropEditor(
+                self.root, target_img, self._add_region_from_editor, self.crop_regions
+            )
 
     def _get_image_path_for_cell(self, row: int, col: int) -> Optional[str]:
         config = self._get_current_config()
@@ -1738,9 +1809,12 @@ class ImageGridApp:
     def _add_region_from_editor(self, x: int, y: int, w: int, h: int, name: str):
         """CropEditorからのコールバック - 新しいクロップ領域を追加"""
         region = CropRegion(
-            x=x, y=y, width=w, height=h,
+            x=x,
+            y=y,
+            width=w,
+            height=h,
             color=(255, 0, 0),
-            name=name or f"Region_{len(self.crop_regions) + 1}"
+            name=name or f"Region_{len(self.crop_regions) + 1}",
         )
         self.crop_regions.append(region)
         self._update_region_list()
@@ -1783,7 +1857,7 @@ class ImageGridApp:
         d_rw = max(0.01, self._get_safe_double(self.dummy_ratio_w, 1.0))
         d_rh = max(0.01, self._get_safe_double(self.dummy_ratio_h, 1.0))
         dummy_w_px = 400
-        dummy_h_px = 400 * (d_rh / d_rw)
+        dummy_h_px = int(400 * (d_rh / d_rw))
 
         border_offset_cm = (
             pt_to_cm(config.zoom_border_width) if config.show_zoom_border else 0.0
@@ -1941,6 +2015,8 @@ class ImageGridApp:
                         metrics,
                         tx,
                         ty,
+                        r,
+                        c,
                         main_l,
                         main_t,
                         img_w_cm,
@@ -1969,6 +2045,8 @@ class ImageGridApp:
         metrics,
         tx,
         ty,
+        row,
+        col,
         main_l,
         main_t,
         img_w_cm,
@@ -1980,6 +2058,21 @@ class ImageGridApp:
         disp = config.crop_display
         # 空クロップ（show_zoomed=False）はautoの位置計算から除外
         num_crops = sum(1 for r in config.crop_regions if r.show_zoomed)
+
+        # If we have a real image for this cell, use its pixel size to convert px-mode regions -> ratio.
+        img_w_px = None
+        img_h_px = None
+        image_path = self._get_image_path_for_cell(row, col)
+        if image_path:
+            try:
+                if image_path in self._image_dim_cache:
+                    img_w_px, img_h_px = self._image_dim_cache[image_path]
+                else:
+                    with Image.open(image_path) as _img:
+                        img_w_px, img_h_px = _img.size
+                    self._image_dim_cache[image_path] = (img_w_px, img_h_px)
+            except Exception:
+                img_w_px = img_h_px = None
 
         # ----------------------
         # Step 1: Draw crop source regions on main image
@@ -1993,11 +2086,18 @@ class ImageGridApp:
                 rw = region.width_ratio or 0.0
                 rh = region.height_ratio or 0.0
             else:
-                # Use pixel-based positioning (normalize to 0-1 using 1000 as reference)
-                rx = region.x / 1000.0
-                ry = region.y / 1000.0
-                rw = region.width / 1000.0
-                rh = region.height / 1000.0
+                # px-mode: prefer converting using actual image pixel dimensions when available.
+                if img_w_px and img_h_px and img_w_px > 0 and img_h_px > 0:
+                    rx = region.x / float(img_w_px)
+                    ry = region.y / float(img_h_px)
+                    rw = region.width / float(img_w_px)
+                    rh = region.height / float(img_h_px)
+                else:
+                    # Fallback (legacy preview behavior): treat values as 1000-based normalized coords.
+                    rx = region.x / 1000.0
+                    ry = region.y / 1000.0
+                    rw = region.width / 1000.0
+                    rh = region.height / 1000.0
 
             # Convert to canvas coordinates
             crop_l = main_l + rx * img_w_cm
@@ -2056,7 +2156,9 @@ class ImageGridApp:
                 crop_rw = region.width / 1000.0 if region.width > 0 else 0.1
                 crop_rh = region.height / 1000.0 if region.height > 0 else 0.1
             # クロップ領域の実際のピクセル比率（画像のアスペクト比を考慮）
-            crop_aspect = (crop_rw * img_w_cm) / (crop_rh * img_h_cm) if crop_rh > 0 else 1.0
+            crop_aspect = (
+                (crop_rw * img_w_cm) / (crop_rh * img_h_cm) if crop_rh > 0 else 1.0
+            )
 
             # Calculate crop size (maintaining aspect ratio)
             if disp.scale is not None or disp.size is not None:
@@ -2115,14 +2217,18 @@ class ImageGridApp:
                     else:
                         # 中間のクロップは均等配置
                         if disp.scale is not None or disp.size is not None:
-                            total_crop_h = num_crops * c_h + (num_crops - 1) * actual_gap_cc
+                            total_crop_h = (
+                                num_crops * c_h + (num_crops - 1) * actual_gap_cc
+                            )
                             start_y = main_t + (img_h_cm - total_crop_h) / 2
                             c_t = start_y + visible_crop_idx * (c_h + actual_gap_cc)
                         else:
                             single_h = (
                                 img_h_cm - actual_gap_cc * (num_crops - 1)
                             ) / num_crops
-                            slot_top = main_t + visible_crop_idx * (single_h + actual_gap_cc)
+                            slot_top = main_t + visible_crop_idx * (
+                                single_h + actual_gap_cc
+                            )
                             c_t = slot_top + (single_h - c_h) / 2
             else:  # bottom
                 c_t = main_t + img_h_cm + this_gap_mc
@@ -2142,14 +2248,18 @@ class ImageGridApp:
                     else:
                         # 中間のクロップは均等配置
                         if disp.scale is not None or disp.size is not None:
-                            total_crop_w = num_crops * c_w + (num_crops - 1) * actual_gap_cc
+                            total_crop_w = (
+                                num_crops * c_w + (num_crops - 1) * actual_gap_cc
+                            )
                             start_x = main_l + (img_w_cm - total_crop_w) / 2
                             c_l = start_x + visible_crop_idx * (c_w + actual_gap_cc)
                         else:
                             single_w = (
                                 img_w_cm - actual_gap_cc * (num_crops - 1)
                             ) / num_crops
-                            slot_left = main_l + visible_crop_idx * (single_w + actual_gap_cc)
+                            slot_left = main_l + visible_crop_idx * (
+                                single_w + actual_gap_cc
+                            )
                             c_l = slot_left + (single_w - c_w) / 2
 
             # Draw crop placeholder (with matching color)
@@ -2218,13 +2328,17 @@ class ImageGridApp:
                         region.y_ratio = region.y / ref_size
                         region.width_ratio = region.width / ref_size
                         region.height_ratio = region.height / ref_size
-                        region.mode = "ratio"  # ratioモードを維持（異なる画像サイズに対応）
+                        region.mode = (
+                            "ratio"  # ratioモードを維持（異なる画像サイズに対応）
+                        )
                 # 配置方向も適用
                 self.crop_pos.set(preset.display_position)
                 self._update_region_list()
                 self._schedule_preview()
                 self._save_state()
-                messagebox.showinfo("成功", f"プリセット '{preset_name}' を読み込みました")
+                messagebox.showinfo(
+                    "成功", f"プリセット '{preset_name}' を読み込みました"
+                )
                 return
 
         messagebox.showerror("エラー", f"プリセット '{preset_name}' が見つかりません")
@@ -2241,13 +2355,15 @@ class ImageGridApp:
         if not name:
             return
 
-        description = simpledialog.askstring("プリセット保存", "説明 (オプション):", initialvalue="")
+        description = simpledialog.askstring(
+            "プリセット保存", "説明 (オプション):", initialvalue=""
+        )
 
         preset = CropPreset(
             name=name,
             regions=copy.deepcopy(self.crop_regions),
             description=description or "",
-            display_position=self.crop_pos.get()  # 現在の配置方向も保存
+            display_position=self.crop_pos.get(),  # 現在の配置方向も保存
         )
 
         try:
@@ -2280,7 +2396,7 @@ class ImageGridApp:
         """設定ファイルを保存する"""
         path = filedialog.asksaveasfilename(
             defaultextension=".yaml",
-            filetypes=[("YAML files", "*.yaml;*.yml"), ("All files", "*.*")]
+            filetypes=[("YAML files", "*.yaml;*.yml"), ("All files", "*.*")],
         )
         if not path:
             return
@@ -2370,7 +2486,7 @@ def main():
     if len(sys.argv) > 1:
         initial_config = sys.argv[1]
 
-    app = ImageGridApp(root, initial_config)
+    ImageGridApp(root, initial_config)
     root.mainloop()
 
 
