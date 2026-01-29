@@ -1853,6 +1853,33 @@ class ImageGridApp:
 
         metrics = calculate_grid_metrics(config)
 
+        def _cell_input_state(row: int, col: int) -> tuple[Optional[str], bool]:
+            """Return (image_path, is_placeholder).
+
+            image_path is None for empty cells and placeholders.
+            """
+            if config.images:
+                idx = row * config.cols + col
+                if 0 <= idx < len(config.images):
+                    raw = config.images[idx]
+                    if raw == "__PLACEHOLDER__":
+                        return None, True
+                    return raw, False
+                return None, False
+
+            # folder mode
+            folders = config.folders or []
+            if config.arrangement == "row":
+                if row >= len(folders):
+                    return None, False
+                imgs = get_sorted_images(folders[row])
+                return (imgs[col], False) if col < len(imgs) else (None, False)
+            else:
+                if col >= len(folders):
+                    return None, False
+                imgs = get_sorted_images(folders[col])
+                return (imgs[row], False) if row < len(imgs) else (None, False)
+
         # Get dummy image ratio
         d_rw = max(0.01, self._get_safe_double(self.dummy_ratio_w, 1.0))
         d_rh = max(0.01, self._get_safe_double(self.dummy_ratio_h, 1.0))
@@ -1990,17 +2017,43 @@ class ImageGridApp:
 
                 has_crops = should_apply_crop(r, c, config)
 
+                cell_img_path, is_placeholder = _cell_input_state(r, c)
+                is_empty = cell_img_path is None
+
                 # Draw main image placeholder (clickable)
                 tag = f"cell_{r}_{c}"
-                canvas.create_rectangle(
-                    tx(main_l),
-                    ty(main_t),
-                    tx(main_l + img_w_cm),
-                    ty(main_t + img_h_cm),
-                    fill="#ddf",
-                    outline="blue",
-                    tags=(tag,),
-                )
+                if is_empty:
+                    canvas.create_rectangle(
+                        tx(main_l),
+                        ty(main_t),
+                        tx(main_l + img_w_cm),
+                        ty(main_t + img_h_cm),
+                        fill="#f0f0f0",
+                        outline="#888",
+                        dash=(4, 2),
+                        tags=(tag,),
+                    )
+                else:
+                    canvas.create_rectangle(
+                        tx(main_l),
+                        ty(main_t),
+                        tx(main_l + img_w_cm),
+                        ty(main_t + img_h_cm),
+                        fill="#ddf",
+                        outline="blue",
+                        tags=(tag,),
+                    )
+
+                if is_empty:
+                    label = "空セル" if is_placeholder else "空"
+                    canvas.create_text(
+                        tx(main_l + img_w_cm / 2),
+                        ty(main_t + img_h_cm / 2),
+                        text=label,
+                        fill="#555",
+                        font=("Segoe UI", max(8, int(10 * scale))),
+                        tags=(tag,),
+                    )
                 canvas.tag_bind(
                     tag,
                     "<Button-1>",
