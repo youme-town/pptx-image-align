@@ -2045,13 +2045,16 @@ class ImageGridApp:
                     )
 
                 if is_empty:
-                    label = "空セル" if is_placeholder else "空"
+                    label = "EMPTY"
+                    rect_px_w = img_w_cm * scale
+                    rect_px_h = img_h_cm * scale
+                    font_size = int(max(8, min(14, min(rect_px_w, rect_px_h) / 8)))
                     canvas.create_text(
                         tx(main_l + img_w_cm / 2),
                         ty(main_t + img_h_cm / 2),
                         text=label,
                         fill="#555",
-                        font=("Segoe UI", max(8, int(10 * scale))),
+                        font=("Segoe UI", font_size, "bold"),
                         tags=(tag,),
                     )
                 canvas.tag_bind(
