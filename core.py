@@ -946,6 +946,8 @@ def calculate_item_bounds(
     """
     crop_regions = get_crop_regions_for_cell(row_idx, col_idx, config)
     has_crops = bool(crop_regions) and should_apply_crop(row_idx, col_idx, config)
+    # show_zoomed=False の領域は拡大画像を描画しないため、bounds（auto配置）には含めない
+    zoom_regions = [r for r in crop_regions if getattr(r, "show_zoomed", True)]
 
     if override_size:
         orig_w, orig_h = override_size
@@ -958,10 +960,20 @@ def calculate_item_bounds(
 
     min_x, min_y = 0.0, 0.0
     max_x, max_y = orig_w, orig_h
-    half_border = border_offset_cm / 2.0 if config.show_zoom_border else 0.0
 
-    if has_crops and crop_regions:
-        num_crops = len(crop_regions)
+    # PowerPointの線は図形境界の外側に「半分」出るため、配置計算上は外形を膨らませる
+    half_zoom_border = border_offset_cm / 2.0 if config.show_zoom_border else 0.0
+
+    # 元画像上のクロップ枠線も同様に外側へ半分出る（端揃え時のはみ出し対策）
+    if has_crops and config.show_crop_border:
+        half_crop_border = pt_to_cm(config.crop_border_width) / 2.0
+        min_x -= half_crop_border
+        min_y -= half_crop_border
+        max_x += half_crop_border
+        max_y += half_crop_border
+
+    if has_crops and zoom_regions:
+        num_crops = len(zoom_regions)
         disp = config.crop_display
         actual_gap_mc = disp.main_crop_gap.to_cm(
             orig_w if disp.position == "right" else orig_h
@@ -977,7 +989,7 @@ def calculate_item_bounds(
             actual_gap_mc += border_offset_cm
             actual_gap_cc += border_offset_cm
 
-        for crop_idx, region in enumerate(crop_regions):
+        for crop_idx, region in enumerate(zoom_regions):
             cw, ch = _calculate_crop_size(
                 config,
                 metrics,
@@ -1003,7 +1015,7 @@ def calculate_item_bounds(
                     orig_h,
                     ch,
                     actual_gap_cc,
-                    half_border,
+                    half_zoom_border,
                     disp,
                 )
             else:
@@ -1015,14 +1027,15 @@ def calculate_item_bounds(
                     orig_w,
                     cw,
                     actual_gap_cc,
-                    half_border,
+                    half_zoom_border,
                     disp,
                 )
 
-            min_x = min(min_x, c_left)
-            min_y = min(min_y, c_top)
-            max_x = max(max_x, c_left + cw)
-            max_y = max(max_y, c_top + ch)
+            # 拡大画像の枠線（zoom border）が外側へ半分出るのを反映
+            min_x = min(min_x, c_left - half_zoom_border)
+            min_y = min(min_y, c_top - half_zoom_border)
+            max_x = max(max_x, c_left + cw + half_zoom_border)
+            max_y = max(max_y, c_top + ch + half_zoom_border)
 
         if disp.position == "bottom":
             max_y += actual_gap_cb
@@ -1112,9 +1125,9 @@ def _calculate_crop_vertical_position(
     else:  # auto
         # 最初と最後のクロップは端に揃える（pin ends）
         if crop_idx == 0:
-            return 0.0
+            return 0.0 + half_border
         elif num_crops > 1 and crop_idx == num_crops - 1:
-            return orig_h - ch
+            return orig_h - ch - half_border
         else:
             # 中間のクロップは均等配置
             if disp.scale is not None or disp.size is not None:
@@ -1149,9 +1162,9 @@ def _calculate_crop_horizontal_position(
     else:  # auto
         # 最初と最後のクロップは端に揃える（pin ends）
         if crop_idx == 0:
-            return 0.0
+            return 0.0 + half_border
         elif num_crops > 1 and crop_idx == num_crops - 1:
-            return orig_w - cw
+            return orig_w - cw - half_border
         else:
             # 中間のクロップは均等配置
             if disp.scale is not None or disp.size is not None:
@@ -1757,9 +1770,9 @@ def _calculate_crop_absolute_vertical_position(
     else:  # auto
         # 最初と最後のクロップは端に揃える（pin ends）
         if crop_idx == 0:
-            return final_main_top
+            return final_main_top + half_border
         elif num_crops > 1 and crop_idx == num_crops - 1:
-            return (final_main_top + orig_h) - ch
+            return (final_main_top + orig_h) - ch - half_border
         else:
             # 中間のクロップは均等配置
             if disp.scale is not None or disp.size is not None:
@@ -1795,9 +1808,9 @@ def _calculate_crop_absolute_horizontal_position(
     else:  # auto
         # 最初と最後のクロップは端に揃える（pin ends）
         if crop_idx == 0:
-            return final_main_left
+            return final_main_left + half_border
         elif num_crops > 1 and crop_idx == num_crops - 1:
-            return (final_main_left + orig_w) - cw
+            return (final_main_left + orig_w) - cw - half_border
         else:
             # 中間のクロップは均等配置
             if disp.scale is not None or disp.size is not None:
