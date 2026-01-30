@@ -6,7 +6,7 @@ Example of GUI
 ![Output example](docs/images/output.png)
 Example of output.pptx
 
-複数の画像を PowerPoint（`.pptx`）上に **グリッド / フロー（詰め配置）**で並べて出力するツールです。
+複数の画像を PowerPoint（.pptx）上に「グリッド整列」または「フロー（詰め）配置」で並べて出力するツールです。
 GUI でプレビューしながら調整するか、YAML 設定ファイルを使って CLI で一括生成できます。
 
 - CLI: [cli.py](cli.py)
@@ -15,142 +15,121 @@ GUI でプレビューしながら調整するか、YAML 設定ファイルを�
 
 ---
 
-## 実装されている機能一覧
+## できること（実装ベース）
 
-### 1. スライド設定
+### レイアウト
 
-- **スライドサイズ**: 幅・高さを cm 単位で指定（デフォルト: 16:9 比率 33.867×19.05 cm）
+- スライドサイズ（cm）指定
+- rows×cols のグリッド
+- レイアウトモード
+  - grid: 各セルに整列
+  - flow: 行ごとに“中身の実幅”で詰める（左右揃え・上下揃え対応）
+- 余白（margin）、間隔（gap）
+  - gap は cm 固定または scale（参照サイズ×倍率）
 
-### 2. グリッド構成
+### 入力
 
-- **グリッドサイズ**: rows × cols で指定
-- **配列モード**: `row`（各フォルダが行）または `col`（各フォルダが列）
-- **レイアウトモード**:
-  - `grid`: 厳密に整列（ガイド線に沿う）
-  - `flow`: 詰め配置（コンパクト）
+- フォルダ入力（folder mode）
+  - 画像はファイル名中の数字でソート（例: 1.png, 2.png, 10.png）
+  - arrangement: row/col（フォルダが行になるか列になるか）
+- 画像リスト入力（images mode）
+  - row-major（左→右、上→下）順にパスを並べる
+  - 空セルを作りたい場合は __PLACEHOLDER__ を入れる（CLI/YAML でも GUI でも利用）
 
-### 3. フロー配置オプション
+対応画像形式: .png / .jpg / .jpeg / .gif / .bmp / .tiff / .webp
 
-- **水平方向揃え**: `left` / `center` / `right`
-- **垂直方向揃え**: `top` / `center` / `bottom`
+### クロップ（拡大表示）
 
-### 4. マージン・間隔設定
+- 1 枚の画像に複数のクロップ領域（CropRegion）を定義
+- 座標指定
+  - px: x/y/width/height をピクセルで指定
+  - ratio: x_ratio/y_ratio/width_ratio/height_ratio を 0.0〜1.0 で指定（画像サイズ差に強い）
+- 表示
+  - position: right / bottom
+  - size（cm）または scale（メイン画像に対する倍率）
+  - 各領域ごとに align/offset/gap を個別指定
+  - show_zoomed: false にすると「枠線だけ（拡大画像は出さない）」が可能
+- 適用セルの制御（YAML/CLI 向け）
+  - crop.rows / crop.cols（0-index、null は全て）
+  - crop.targets（行・列の明示指定）
+  - crop.overrides（セル単位の上書き/無効化）
 
-- **マージン**: 左・上・右・下を個別に cm 単位で指定
-- **間隔（gap）**:
-  - 水平・垂直方向を個別に設定
-  - **cm モード**: 固定値（cm）
-  - **scale モード**: 画像サイズに対する比率
+### 装飾
 
-### 5. 画像サイズ設定
+- クロップ枠線（元画像上）/ 拡大画像枠線（pt、rectangle/rounded）
+- クロップ枠と拡大画像を結ぶ連結線（connector）
+  - dash_style: solid / dash / dot
+  - 注意: 現状は直線のみ（connector.style は将来用）
 
-- **サイズモード**:
-  - `fit`: グリッドに合わせて自動計算
-  - `fixed`: 固定サイズを指定
-- **フィットモード**（fitモード時）:
-  - `fit`: 縦横両方が収まる最大サイズ
-  - `width`: 幅を基準にフィット
-  - `height`: 高さを基準にフィット
-- **スケール**: 画像の拡大/縮小率
+### ラベル（キャプション）
 
-### 6. クロップ（拡大表示）機能
+- 画像の上下にテキストを配置
+- filename / number（連番）/ custom（任意テキスト配列）
 
-#### 基本機能
+### テンプレート PPTX
 
-- **複数クロップ領域**: 1つの画像に対して複数のクロップ領域を定義可能
-- **座標指定方式**:
-  - `px`（ピクセル）: x, y, width, height を直接指定
-  - `ratio`（比率）: x_ratio, y_ratio, width_ratio, height_ratio で指定（サイズの異なる画像に対応）
+- template.path を指定すると、その PPTX をベースに 1 スライド追加して描画
+- template.layout_index で使用レイアウトを選択（既定 6=白紙）
 
-#### 適用セルの制御
+### CLI バッチ処理
 
-- **rows/cols フィルタ**: 適用する行/列を指定（0-indexed）
-- **targets**: 明示的に (row, col) ペアで適用セルを指定
-- **overrides**: セル単位で独自のクロップ領域を設定（または無効化）
-
-#### 表示設定
-
-- **配置位置**: `right`（右）または `bottom`（下）
-- **サイズ指定**:
-  - `size`: 絶対サイズ（cm）
-  - `scale`: メイン画像に対する比率
-- **アライメント**: `auto` / `start` / `center` / `end`
-- **オフセット**: 位置の微調整（cm）
-- **個別ギャップ**: クロップ領域ごとにメイン画像との間隔を上書き
-
-#### 間隔設定
-
-- **main_crop_gap**: メイン画像とクロップ画像の間隔
-- **crop_crop_gap**: クロップ画像同士の間隔
-- **crop_bottom_gap**: クロップ領域下部の追加間隔
-
-### 7. 枠線設定
-
-- **クロップ枠線**（元画像上）:
-  - 表示/非表示
-  - 線幅（pt）
-  - 形状: `rectangle` / `rounded`
-- **拡大画像枠線**:
-  - 表示/非表示
-  - 線幅（pt）
-  - 形状: `rectangle` / `rounded`
-- **色**: クロップ領域ごとに RGB で指定可能
-
-### 8. 入力方式
-
-- **フォルダモード**: フォルダパスを指定し、中の画像を自動読み込み（ファイル名の数字でソート）
-- **画像リストモード**: 画像パスを個別に指定（row-major 順）
-
-### 9. GUI 機能
-
-- **リアルタイムプレビュー**: 設定変更を即座に反映
-- **ダミー画像比率設定**: プレビュー用のアスペクト比を指定
-- **クロップエディタ**: 画像上でドラッグしてクロップ領域を選択
-- **セルクリック**: プレビュー上のセルをクリックしてクロップ編集
-- **設定の保存/読み込み**: YAML 形式で設定をエクスポート/インポート
-- **タブ構成**:
-  - 基本・フォルダ
-  - レイアウト
-  - クロップ設定
-  - 装飾（枠線）
-
-### 10. CLI 機能
-
-- **設定ファイルから生成**: `cli.py config.yaml`
-- **サンプル設定生成**: `cli.py --init [filename]`
-- **ヘルプ表示**: `cli.py --help`
-
-### 11. 対応画像形式
-
-- PNG, JPG, JPEG, GIF, BMP, TIFF, WebP
+- 単一 YAML から生成
+- 複数 YAML を一括処理（--batch / --batch-dir / --batch-output）
 
 ---
 
 ## 必要環境
 
-- Python >= 3.10（開発設定: [.python-version](.python-version)）
-- 依存関係は [pyproject.toml](pyproject.toml) で管理
-  - `python-pptx`: PowerPoint 生成
-  - `pyyaml`: YAML 設定ファイル解析
-  - `pillow`: 画像処理（GUI での表示・クロップ）
+- Python >= 3.10
+- 依存関係: [pyproject.toml](pyproject.toml)
+  - python-pptx（PPTX 生成）
+  - pillow（画像処理 / GUI）
+  - pyyaml（設定ファイル）
 
 ---
 
-## インストール（uv 推奨）
+## インストール
 
-### 1) uv の導入
-
-未導入なら（各 OS に合わせて）: <https://docs.astral.sh/uv/>
-
-### 2) 依存関係の同期
+### uv（推奨）
 
 ```sh
 uv sync
 ```
 
+### pip（代替）
+
+```sh
+python -m pip install -U pip
+python -m pip install .
+```
+
+---
+
+## 使い方（GUI）
+
+起動:
+
+```sh
+uv run python gui.py
+```
+
+設定ファイルを指定して起動:
+
+```sh
+uv run python gui.py config.yaml
+```
+
+GUI では、入力（フォルダ/画像リスト）・レイアウト調整・クロップ領域作成（Crop Editor）・設定保存・PPTX 生成ができます。
+
 ---
 
 ## 使い方（CLI）
+
+### ヘルプ
+
+```sh
+uv run python cli.py --help
+```
 
 ### サンプル設定ファイルを生成
 
@@ -158,44 +137,40 @@ uv sync
 uv run python cli.py --init config.yaml
 ```
 
-`config.yaml` は [`core.generate_sample_config`](core.py) が生成します。
-
 ### YAML から PPTX を生成
 
 ```sh
 uv run python cli.py config.yaml
 ```
 
-内部的には以下が使われます：
-
-- 設定ロード: [`core.load_config`](core.py)
-- PPTX 生成: [`core.create_grid_presentation`](core.py)
-
----
-
-## 使い方（GUI）
-
-### 起動
+### バッチ処理
 
 ```sh
-uv run python gui.py
+uv run python cli.py --batch a.yaml b.yaml c.yaml
 ```
-
-設定ファイルを指定して起動：
 
 ```sh
-uv run python gui.py config.yaml
+uv run python cli.py --batch-dir ./configs
 ```
 
-GUI では、フォルダ追加・レイアウト調整・クロップ領域作成（エディタ）・設定保存・PPTX 生成ができます。
+```sh
+uv run python cli.py --batch-output ./out a.yaml b.yaml
+```
+
+### グリッドサイズの自動推定（CLI）
+
+CLI は folders が指定されている場合、rows/cols が 0 のときにフォルダ構造から推定します。
+
+- arrangement=row の場合: rows=フォルダ数、cols=各フォルダ内の最大画像数
+- arrangement=col の場合: cols=フォルダ数、rows=各フォルダ内の最大画像数
 
 ---
 
 ## 入力フォルダ構造と並び順
 
-`folders:` に列挙したフォルダから画像を読み込み、ファイル名中の数字でソートします（[`core.get_sorted_images`](core.py)）。
+folders に列挙したフォルダから画像を読み込み、ファイル名中の数字でソートします（core.get_sorted_images）。
 
-例（本リポジトリの同梱例）:
+例（本リポジトリ同梱）:
 
 ```text
 images/
@@ -203,149 +178,74 @@ images/
   row2/
 ```
 
-- `grid.arrangement: row` の場合：各フォルダが「行」
-- `grid.arrangement: col` の場合：各フォルダが「列」
+- grid.arrangement=row の場合：各フォルダが「行」
+- grid.arrangement=col の場合：各フォルダが「列」
 
 ---
 
-## 設定ファイル（YAML）概要
+## 設定ファイル（YAML）
 
 サンプル: [config.yaml](config.yaml)
 
-### 主要項目
+### 主要項目（抜粋）
 
-| カテゴリ       | 項目                             | 説明                                      |
-| -------------- | -------------------------------- | ----------------------------------------- |
-| `slide`        | `width`, `height`                | スライドサイズ（cm）                      |
-| `grid`         | `rows`, `cols`                   | グリッドサイズ                            |
-| `grid`         | `arrangement`                    | `row` / `col`                             |
-| `grid`         | `layout_mode`                    | `grid` / `flow`                           |
-| `grid`         | `flow_align`                     | `left` / `center` / `right`               |
-| `grid`         | `flow_vertical_align`            | `top` / `center` / `bottom`               |
-| `margin`       | `left`, `top`, `right`, `bottom` | マージン（cm）                            |
-| `gap`          | `horizontal`, `vertical`         | 間隔（cm or `{value, mode}`）             |
-| `image`        | `size_mode`                      | `fit` / `fixed`                           |
-| `image`        | `fit_mode`                       | `fit` / `width` / `height`                |
-| `image`        | `width`, `height`                | 固定サイズ時のサイズ                      |
-| `crop.regions` | -                                | クロップ領域リスト                        |
-| `crop`         | `rows`, `cols`                   | 適用セル指定（0-index、`null` は全て）    |
-| `crop`         | `targets`                        | 適用セル明示指定（例: `[{row:0,col:1}]`） |
-| `crop`         | `overrides`                      | セル単位のクロップ上書き                  |
-| `crop.display` | `position`                       | `right` / `bottom`                        |
-| `crop.display` | `size`, `scale`                  | サイズ指定                                |
-| `border.crop`  | `show`, `width`, `shape`         | クロップ枠線設定                          |
-| `border.zoom`  | `show`, `width`, `shape`         | 拡大画像枠線設定                          |
-| `folders`      | -                                | 入力フォルダリスト                        |
-| `images`       | -                                | 画像パス直接指定（row-major）             |
-| `output`       | -                                | 出力ファイルパス                          |
+| カテゴリ       | 項目                                            | 説明                                          |
+| -------------- | ----------------------------------------------- | --------------------------------------------- |
+| slide          | width / height                                  | スライドサイズ（cm）                          |
+| grid           | rows / cols                                     | グリッドサイズ（CLI では 0 指定で自動推定可） |
+| grid           | arrangement                                     | row / col                                     |
+| grid           | layout_mode                                     | grid / flow                                   |
+| grid           | flow_align                                      | left / center / right（flow のみ）            |
+| grid           | flow_vertical_align                             | top / center / bottom（flow のみ）            |
+| margin         | left/top/right/bottom                           | 余白（cm）                                    |
+| gap            | horizontal/vertical                             | 間隔（数値=cm、または {value, mode}）         |
+| image          | size_mode                                       | fit / fixed                                   |
+| image          | fit_mode                                        | fit / width / height                          |
+| image          | width/height                                    | 固定サイズ（size_mode=fixed のとき）          |
+| image          | scale                                           | 画像スケール（現状は未使用・将来用）          |
+| crop           | regions                                         | クロップ領域の配列                            |
+| crop.regions[] | mode                                            | px / ratio                                    |
+| crop.regions[] | x/y/width/height                                | px 指定時（ピクセル）                         |
+| crop.regions[] | x_ratio/...                                     | ratio 指定時（0.0〜1.0）                      |
+| crop.regions[] | show_zoomed                                     | false で「枠のみ」                            |
+| crop           | rows/cols                                       | 適用行/列（0-index、null は全て）             |
+| crop           | targets                                         | 適用セル明示指定（例: [{row:0,col:1}]）       |
+| crop           | overrides                                       | セル単位の上書き（空リストで無効化）          |
+| crop.display   | position                                        | right / bottom                                |
+| crop.display   | size / scale                                    | 拡大画像サイズ（cm / 倍率）                   |
+| crop.display   | main_crop_gap / crop_crop_gap / crop_bottom_gap | 間隔（cm/scale）                              |
+| border         | crop / zoom                                     | 枠線設定（show/width/shape）                  |
+| label          | enabled/mode/...                                | ラベル設定（filename/number/custom）          |
+| template       | path / layout_index                             | テンプレート PPTX とレイアウト番号            |
+| connector      | show/width/color/dash_style                     | 連結線設定（style は現状未使用）              |
+| folders        | -                                               | 入力フォルダ一覧                              |
+| images         | -                                               | 画像パス一覧（row-major、__PLACEHOLDER__ 可） |
+| output         | -                                               | 出力 pptx パス                                |
 
 ---
 
-## クロップ（拡大表示）について
+## クロッププリセット
 
-- クロップ領域はピクセル座標（`x, y, width, height`）で定義できます（[`core.CropRegion`](core.py)）。
-- 画像サイズがバラバラでも同じ位置を切り出したい場合、`mode: ratio` と `x_ratio/y_ratio/width_ratio/height_ratio` で比率指定できます。
-- 適用セルは [`core.should_apply_crop`](core.py) の条件（`crop.targets` → `crop.overrides` → `crop.rows/cols`）で決まります。
-- 拡大画像の配置計算は [`core.calculate_item_bounds`](core.py) と関連関数群で行っています。
+GUI の「クロッププリセット」は、ビルトインプリセット + crop_presets.yaml（任意）を読み込みます。
+
+- 保存先: crop_presets.yaml（作業ディレクトリ）
+- 形式: presets: の配列（name/description/display_position/regions）
 
 ---
 
-## アーキテクチャ
+## アーキテクチャ（概要）
 
 ```text
 ┌─────────────┐     ┌─────────────┐
 │   gui.py    │     │   cli.py    │
-│  (tkinter)  │     │  (argparse) │
+│  (tkinter)  │     │   (argv)    │
 └──────┬──────┘     └──────┬──────┘
        │                   │
        └─────────┬─────────┘
                  ▼
-         ┌─────────────┐
-         │   core.py   │
-         │ (共通ロジック) │
-         └──────┬──────┘
-                 │
-    ┌────────────┼────────────┐
-    ▼            ▼            ▼
-┌─────────┐ ┌─────────┐ ┌─────────┐
-│ python- │ │  PIL/   │ │  PyYAML │
-│  pptx   │ │ Pillow  │ │         │
-└─────────┘ └─────────┘ └─────────┘
+              core.py
+   (設定ロード/保存、レイアウト計算、PPTX出力)
 ```
-
-### 処理フロー
-
-```text
-設定ファイル (YAML) or GUI入力
-    ↓
-load_config() / GUI設定
-    ↓
-build_image_grid() → rows×cols の画像グリッドを構築
-    ↓
-calculate_grid_metrics() → 列幅・行高さ・クロップサイズを計算
-    ↓
-For each cell:
-    ├─ calculate_item_bounds() → 画像とクロップの領域を計算
-    ├─ add_picture() → PowerPoint にメイン画像を追加
-    ├─ add_crop_borders_to_image() → クロップ枠線を描画
-    ├─ crop_image() → クロップ領域を抽出
-    ├─ add_picture() → クロップ画像を追加
-    └─ add_border_shape() → 拡大画像の枠線を追加
-    ↓
-save() → output.pptx を生成
-```
-
----
-
-## 改善案（反映状況）
-
-- [x] サイズの違う画像を並べる（比率違い含む）
-  → `fit_mode` + レイアウト計算で吸収
-- [x] サイズの違う画像（縦横比は同じ）の一括クロップ
-  → `crop.regions[].mode: ratio` を追加
-- [x] クロップできる画像を選択できるようにする
-  → `crop.targets` を追加
-- [x] 画像をフォルダで追加するだけでなく、画像を個別に追加する
-  → GUI に「画像リスト」入力モードを追加（`images` も保存可能）
-- [x] プレビュー画面クリックで画像を編集できるようにする（クロップなど）
-  → セルクリックで CropEditor を開く
-- [ ] プレビュー画面で実画像を表示する（完全プレビュー）
-
----
-
-## 追加機能の提案
-
-以下は今後の開発で検討できる機能です：
-
-### 優先度: 高
-
-1. **完全プレビュー機能**
-   - 現在はダミー画像でプレビューしているが、実画像を表示
-   - 出力結果をより正確に確認可能
-
-2. **マルチスライド対応**
-   - 画像数がグリッドを超える場合、自動的に複数スライドに分割
-   - ページ送り設定（rows × cols × pages）
-
-3. **空クロップ機能**
-   - クロップはしないが矩形を画像上に追加する機能
-   - クロップ画像を表示するか否かを選択できるようにする
-   - ただし，空クロップを選択した際は(auto)などのアルゴリズムに関与しないようにする（つまり，クロップ画像としてカウントしないように）
-
-### 優先度: 中
-
-1. **ドラッグ＆ドロップ入力**
-   - GUI にファイル/フォルダをドラッグ＆ドロップで追加
-
-### 優先度: 低
-
-1. **追加エクスポート形式**
-   - PDF 出力
-   - PNG/JPG 画像出力（スライド単位）
-
-2. **画像フィルタ/エフェクト**
-   - グレースケール、セピア、明るさ調整など
-   - クロップ画像のみにエフェクト適用
 
 ---
 
