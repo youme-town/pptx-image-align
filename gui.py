@@ -476,6 +476,7 @@ class ImageGridApp:
         self.layout_mode = tk.StringVar(value="flow")
         self.flow_align = tk.StringVar(value="left")
         self.flow_vertical_align = tk.StringVar(value="center")
+        self.flow_axis = tk.StringVar(value="both")
 
         # Slide settings
         self.slide_w = tk.DoubleVar(value=33.867)
@@ -515,9 +516,11 @@ class ImageGridApp:
         self.show_crop_border = tk.BooleanVar(value=True)
         self.crop_border_w = tk.DoubleVar(value=1.5)
         self.crop_border_shape = tk.StringVar(value="rectangle")
+        self.crop_border_dash = tk.StringVar(value="solid")
         self.show_zoom_border = tk.BooleanVar(value=True)
         self.zoom_border_w = tk.DoubleVar(value=1.5)
         self.zoom_border_shape = tk.StringVar(value="rectangle")
+        self.zoom_border_dash = tk.StringVar(value="solid")
 
         # Label settings
         self.label_enabled = tk.BooleanVar(value=False)
@@ -567,6 +570,16 @@ class ImageGridApp:
         self.r_gap = tk.StringVar(value="")
         self.r_show_zoomed = tk.BooleanVar(value=True)
 
+        # 領域ごとの枠線設定 (空=グローバル設定を使用)
+        self.r_show_crop_border = tk.StringVar(value="")  # "", "true", "false"
+        self.r_crop_border_width = tk.StringVar(value="")
+        self.r_crop_border_shape = tk.StringVar(value="")  # "", "rectangle", "rounded"
+        self.r_crop_border_dash = tk.StringVar(value="")  # "", "solid", "dash", "dot", "dash_dot"
+        self.r_show_zoom_border = tk.StringVar(value="")
+        self.r_zoom_border_width = tk.StringVar(value="")
+        self.r_zoom_border_shape = tk.StringVar(value="")
+        self.r_zoom_border_dash = tk.StringVar(value="")
+
         # Cache for image dimensions used by preview rendering
         self._image_dim_cache: Dict[str, Tuple[int, int]] = {}
 
@@ -581,6 +594,15 @@ class ImageGridApp:
             self.r_offset,
             self.r_gap,
             self.r_show_zoomed,
+            # 領域ごとの枠線設定
+            self.r_show_crop_border,
+            self.r_crop_border_width,
+            self.r_crop_border_shape,
+            self.r_crop_border_dash,
+            self.r_show_zoom_border,
+            self.r_zoom_border_width,
+            self.r_zoom_border_shape,
+            self.r_zoom_border_dash,
         ]:
             var.trace_add("write", self._on_region_detail_change)
 
@@ -759,6 +781,14 @@ class ImageGridApp:
             textvariable=self.flow_vertical_align,
             values=["top", "center", "bottom"],
             width=8,
+        ).pack(side=tk.LEFT)
+
+        ttk.Label(f_mode, text="| Axis:").pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Combobox(
+            f_mode,
+            textvariable=self.flow_axis,
+            values=["both", "horizontal", "vertical"],
+            width=10,
         ).pack(side=tk.LEFT)
 
         # Slide size
@@ -953,6 +983,53 @@ class ImageGridApp:
             side=tk.LEFT, padx=10
         )
 
+        # 領域ごとの枠線設定 (個別上書き)
+        f_border = ttk.LabelFrame(f_detail, text="枠線設定 (空=グローバル)", padding=3)
+        f_border.pack(fill=tk.X, pady=3)
+
+        # クロップ枠線（元画像上）
+        f_cb = ttk.Frame(f_border)
+        f_cb.pack(fill=tk.X)
+        ttk.Label(f_cb, text="元画像:", width=6).pack(side=tk.LEFT)
+        ttk.Label(f_cb, text="表示").pack(side=tk.LEFT)
+        cb_show = ttk.Combobox(
+            f_cb, textvariable=self.r_show_crop_border, values=["", "true", "false"], width=5
+        )
+        cb_show.pack(side=tk.LEFT, padx=2)
+        ttk.Label(f_cb, text="太さ").pack(side=tk.LEFT)
+        ttk.Entry(f_cb, textvariable=self.r_crop_border_width, width=4).pack(side=tk.LEFT, padx=2)
+        ttk.Label(f_cb, text="形状").pack(side=tk.LEFT)
+        ttk.Combobox(
+            f_cb, textvariable=self.r_crop_border_shape,
+            values=["", "rectangle", "rounded"], width=8
+        ).pack(side=tk.LEFT, padx=2)
+        ttk.Label(f_cb, text="線種").pack(side=tk.LEFT)
+        ttk.Combobox(
+            f_cb, textvariable=self.r_crop_border_dash,
+            values=["", "solid", "dash", "dot", "dash_dot"], width=7
+        ).pack(side=tk.LEFT, padx=2)
+
+        # ズーム枠線（拡大画像）
+        f_zb = ttk.Frame(f_border)
+        f_zb.pack(fill=tk.X, pady=2)
+        ttk.Label(f_zb, text="拡大:", width=6).pack(side=tk.LEFT)
+        ttk.Label(f_zb, text="表示").pack(side=tk.LEFT)
+        ttk.Combobox(
+            f_zb, textvariable=self.r_show_zoom_border, values=["", "true", "false"], width=5
+        ).pack(side=tk.LEFT, padx=2)
+        ttk.Label(f_zb, text="太さ").pack(side=tk.LEFT)
+        ttk.Entry(f_zb, textvariable=self.r_zoom_border_width, width=4).pack(side=tk.LEFT, padx=2)
+        ttk.Label(f_zb, text="形状").pack(side=tk.LEFT)
+        ttk.Combobox(
+            f_zb, textvariable=self.r_zoom_border_shape,
+            values=["", "rectangle", "rounded"], width=8
+        ).pack(side=tk.LEFT, padx=2)
+        ttk.Label(f_zb, text="線種").pack(side=tk.LEFT)
+        ttk.Combobox(
+            f_zb, textvariable=self.r_zoom_border_dash,
+            values=["", "solid", "dash", "dot", "dash_dot"], width=7
+        ).pack(side=tk.LEFT, padx=2)
+
         f_r4 = ttk.Frame(f_detail)
         f_r4.pack(fill=tk.X, pady=5)
         ttk.Button(f_r4, text="更新 (Update)", command=self._update_region_detail).pack(
@@ -1052,6 +1129,22 @@ class ImageGridApp:
             value="rounded",
         ).pack(side=tk.LEFT, padx=5)
 
+        f_src_row3 = ttk.Frame(f_src)
+        f_src_row3.pack(fill=tk.X, pady=2)
+        ttk.Label(f_src_row3, text="線種:").pack(side=tk.LEFT)
+        ttk.Radiobutton(
+            f_src_row3, text="実線", variable=self.crop_border_dash, value="solid"
+        ).pack(side=tk.LEFT, padx=3)
+        ttk.Radiobutton(
+            f_src_row3, text="破線", variable=self.crop_border_dash, value="dash"
+        ).pack(side=tk.LEFT, padx=3)
+        ttk.Radiobutton(
+            f_src_row3, text="点線", variable=self.crop_border_dash, value="dot"
+        ).pack(side=tk.LEFT, padx=3)
+        ttk.Radiobutton(
+            f_src_row3, text="一点鎖線", variable=self.crop_border_dash, value="dash_dot"
+        ).pack(side=tk.LEFT, padx=3)
+
         # Cropped image border
         f_zoom = ttk.LabelFrame(
             f_style, text="クロップ画像の枠線 (Cropped Image)", padding=5
@@ -1083,6 +1176,22 @@ class ImageGridApp:
             variable=self.zoom_border_shape,
             value="rounded",
         ).pack(side=tk.LEFT, padx=5)
+
+        f_zoom_row3 = ttk.Frame(f_zoom)
+        f_zoom_row3.pack(fill=tk.X, pady=2)
+        ttk.Label(f_zoom_row3, text="線種:").pack(side=tk.LEFT)
+        ttk.Radiobutton(
+            f_zoom_row3, text="実線", variable=self.zoom_border_dash, value="solid"
+        ).pack(side=tk.LEFT, padx=3)
+        ttk.Radiobutton(
+            f_zoom_row3, text="破線", variable=self.zoom_border_dash, value="dash"
+        ).pack(side=tk.LEFT, padx=3)
+        ttk.Radiobutton(
+            f_zoom_row3, text="点線", variable=self.zoom_border_dash, value="dot"
+        ).pack(side=tk.LEFT, padx=3)
+        ttk.Radiobutton(
+            f_zoom_row3, text="一点鎖線", variable=self.zoom_border_dash, value="dash_dot"
+        ).pack(side=tk.LEFT, padx=3)
 
         # Label settings
         f_label = ttk.LabelFrame(
@@ -1220,6 +1329,7 @@ class ImageGridApp:
             self.layout_mode,
             self.flow_align,
             self.flow_vertical_align,
+            self.flow_axis,
             self.slide_w,
             self.slide_h,
             self.margin_l,
@@ -1257,9 +1367,11 @@ class ImageGridApp:
             self.r_offset,
             self.r_gap,
             self.zoom_border_shape,
+            self.zoom_border_dash,
             self.show_zoom_border,
             self.zoom_border_w,
             self.crop_border_shape,
+            self.crop_border_dash,
             self.show_crop_border,
             self.crop_border_w,
             # Label settings
@@ -1357,6 +1469,20 @@ class ImageGridApp:
                 self.r_gap.set(str(r.gap) if r.gap is not None else "")
                 self.r_color = r.color
                 self.r_show_zoomed.set(r.show_zoomed)
+
+                # 領域ごとの枠線設定を読み込み
+                self.r_show_crop_border.set(
+                    "true" if r.show_crop_border is True else "false" if r.show_crop_border is False else ""
+                )
+                self.r_crop_border_width.set(str(r.crop_border_width) if r.crop_border_width is not None else "")
+                self.r_crop_border_shape.set(r.crop_border_shape or "")
+                self.r_crop_border_dash.set(r.crop_border_dash or "")
+                self.r_show_zoom_border.set(
+                    "true" if r.show_zoom_border is True else "false" if r.show_zoom_border is False else ""
+                )
+                self.r_zoom_border_width.set(str(r.zoom_border_width) if r.zoom_border_width is not None else "")
+                self.r_zoom_border_shape.set(r.zoom_border_shape or "")
+                self.r_zoom_border_dash.set(r.zoom_border_dash or "")
             finally:
                 self._loading_region = False
 
@@ -1393,6 +1519,21 @@ class ImageGridApp:
         except tk.TclError:
             return default
 
+    def _get_dash_pattern(self, dash_style: str):
+        """Convert dash style string to Tkinter dash pattern."""
+        if dash_style == "dash":
+            return (4, 2)
+        elif dash_style == "dot":
+            return (1, 2)
+        elif dash_style == "dash_dot":
+            return (4, 2, 1, 2)
+        elif dash_style == "long_dash":
+            return (8, 4)
+        elif dash_style == "long_dash_dot":
+            return (8, 4, 1, 4)
+        else:
+            return ()  # solid
+
     def _get_current_config(self) -> GridConfig:
         """Build GridConfig from current GUI state."""
         c = GridConfig()
@@ -1400,6 +1541,7 @@ class ImageGridApp:
         c.layout_mode = self.layout_mode.get()
         c.flow_align = self.flow_align.get()
         c.flow_vertical_align = self.flow_vertical_align.get()
+        c.flow_axis = self.flow_axis.get()
         c.slide_width = self._get_safe_double(self.slide_w, 33.867)
         c.slide_height = self._get_safe_double(self.slide_h, 19.05)
         c.rows = max(1, self._get_safe_int(self.rows, 2))
@@ -1468,6 +1610,8 @@ class ImageGridApp:
         # Border settings
         c.zoom_border_shape = self.zoom_border_shape.get()
         c.crop_border_shape = self.crop_border_shape.get()
+        c.crop_border_dash = self.crop_border_dash.get()
+        c.zoom_border_dash = self.zoom_border_dash.get()
         c.show_crop_border = self.show_crop_border.get()
         c.crop_border_width = self._get_safe_double(self.crop_border_w, 1.5)
         c.show_zoom_border = self.show_zoom_border.get()
@@ -1510,6 +1654,7 @@ class ImageGridApp:
         self.layout_mode.set(c.layout_mode)
         self.flow_align.set(c.flow_align)
         self.flow_vertical_align.set(c.flow_vertical_align)
+        self.flow_axis.set(c.flow_axis)
         self.rows.set(c.rows)
         self.cols.set(c.cols)
         self.arrangement.set(c.arrangement)
@@ -1572,6 +1717,8 @@ class ImageGridApp:
 
         self.zoom_border_shape.set(c.zoom_border_shape)
         self.crop_border_shape.set(c.crop_border_shape)
+        self.crop_border_dash.set(c.crop_border_dash)
+        self.zoom_border_dash.set(c.zoom_border_dash)
         self.show_crop_border.set(c.show_crop_border)
         self.crop_border_w.set(c.crop_border_width)
         self.show_zoom_border.set(c.show_zoom_border)
@@ -1852,6 +1999,9 @@ class ImageGridApp:
         )
 
         metrics = calculate_grid_metrics(config)
+        flow_mode = config.layout_mode == "flow"
+        flow_h = flow_mode and config.flow_axis in ("both", "horizontal")
+        flow_v = flow_mode and config.flow_axis in ("both", "vertical")
 
         def _cell_input_state(row: int, col: int) -> tuple[Optional[str], bool]:
             """Return (image_path, is_placeholder).
@@ -1893,47 +2043,98 @@ class ImageGridApp:
 
         # Pre-calculate flow layout
         total_content_height = 0.0
+        total_content_width = 0.0
         row_heights_flow = []
+        flow_col_widths = []
 
-        if config.layout_mode == "flow":
-            for r in range(config.rows):
-                sim_row_h = 0.0
+        if flow_mode:
+            if flow_v:
+                for r in range(config.rows):
+                    sim_row_h = 0.0
+                    for c in range(config.cols):
+                        img_w_cm, img_h_cm = calculate_size_fit_static(
+                            dummy_w_px,
+                            dummy_h_px,
+                            metrics.main_width,
+                            metrics.main_height,
+                            config.fit_mode,
+                        )
+                        override_sz = (img_w_cm, img_h_cm)
+                        min_x, min_y, max_x, max_y = calculate_item_bounds(
+                            config,
+                            metrics,
+                            "dummy",
+                            r,
+                            c,
+                            border_offset_cm,
+                            override_size=override_sz,
+                        )
+                        item_h = max_y - min_y
+                        sim_row_h = max(sim_row_h, item_h)
+
+                    row_heights_flow.append(
+                        sim_row_h if sim_row_h > 0 else metrics.main_height
+                    )
+                    total_content_height += row_heights_flow[-1]
+                    if r < config.rows - 1:
+                        total_content_height += config.gap_v.to_cm(metrics.main_height)
+            else:
+                row_heights_flow = metrics.row_heights[:]
+
+            if flow_h:
                 for c in range(config.cols):
-                    img_w_cm, img_h_cm = calculate_size_fit_static(
-                        dummy_w_px,
-                        dummy_h_px,
-                        metrics.main_width,
-                        metrics.main_height,
-                        config.fit_mode,
-                    )
-                    override_sz = (img_w_cm, img_h_cm)
-                    min_x, min_y, max_x, max_y = calculate_item_bounds(
-                        config,
-                        metrics,
-                        "dummy",
-                        r,
-                        c,
-                        border_offset_cm,
-                        override_size=override_sz,
-                    )
-                    item_h = max_y - min_y
-                    sim_row_h = max(sim_row_h, item_h)
+                    sim_col_w = 0.0
+                    for r in range(config.rows):
+                        img_w_cm, img_h_cm = calculate_size_fit_static(
+                            dummy_w_px,
+                            dummy_h_px,
+                            metrics.main_width,
+                            metrics.main_height,
+                            config.fit_mode,
+                        )
+                        min_x, min_y, max_x, max_y = calculate_item_bounds(
+                            config,
+                            metrics,
+                            "dummy",
+                            r,
+                            c,
+                            border_offset_cm,
+                            override_size=(img_w_cm, img_h_cm),
+                        )
+                        item_w = max_x - min_x
+                        sim_col_w = max(sim_col_w, item_w)
 
-                row_heights_flow.append(
-                    sim_row_h if sim_row_h > 0 else metrics.main_height
-                )
-                total_content_height += row_heights_flow[-1]
-                if r < config.rows - 1:
-                    total_content_height += config.gap_v.to_cm(metrics.main_height)
+                    flow_col_widths.append(
+                        sim_col_w if sim_col_w > 0 else metrics.main_width
+                    )
 
-        # Calculate starting Y position
+                total_content_width = sum(flow_col_widths)
+                if config.cols > 1:
+                    total_content_width += (config.cols - 1) * config.gap_h.to_cm(
+                        metrics.main_width
+                    )
+            else:
+                flow_col_widths = metrics.col_widths[:]
+
+        # Calculate starting positions
         cy = config.margin_top
-        if config.layout_mode == "flow":
-            avail_h = config.slide_height - config.margin_top - config.margin_bottom
-            if config.flow_vertical_align == "center":
-                cy = config.margin_top + (avail_h - total_content_height) / 2
-            elif config.flow_vertical_align == "bottom":
-                cy = (config.margin_top + avail_h) - total_content_height
+        flow_start_x = config.margin_left
+        if flow_mode:
+            if flow_v:
+                avail_h = config.slide_height - config.margin_top - config.margin_bottom
+                if config.flow_vertical_align == "center":
+                    cy = config.margin_top + (avail_h - total_content_height) / 2
+                elif config.flow_vertical_align == "bottom":
+                    cy = (config.margin_top + avail_h) - total_content_height
+
+            if flow_h:
+                avail_w = config.slide_width - config.margin_left - config.margin_right
+                if config.flow_align == "center":
+                    flow_start_x = (
+                        config.margin_left + (avail_w - total_content_width) / 2
+                    )
+                elif config.flow_align == "right":
+                    flow_start_x = config.margin_left + (avail_w - total_content_width)
 
         # Draw grid
         for r in range(config.rows):
@@ -1947,43 +2148,7 @@ class ImageGridApp:
                 )
             )
 
-            cx = config.margin_left
-
-            # Calculate row content width for flow alignment
-            if config.layout_mode == "flow":
-                row_content_width = 0.0
-                valid_items = 0
-
-                for c in range(config.cols):
-                    img_w_cm, img_h_cm = calculate_size_fit_static(
-                        dummy_w_px,
-                        dummy_h_px,
-                        metrics.main_width,
-                        metrics.main_height,
-                        config.fit_mode,
-                    )
-                    min_x, min_y, max_x, max_y = calculate_item_bounds(
-                        config,
-                        metrics,
-                        "dummy",
-                        r,
-                        c,
-                        border_offset_cm,
-                        override_size=(img_w_cm, img_h_cm),
-                    )
-                    row_content_width += max_x - min_x
-                    valid_items += 1
-
-                if valid_items > 1:
-                    row_content_width += (valid_items - 1) * config.gap_h.to_cm(
-                        metrics.main_width
-                    )
-
-                avail_w = config.slide_width - config.margin_left - config.margin_right
-                if config.flow_align == "center":
-                    cx = config.margin_left + (avail_w - row_content_width) / 2
-                elif config.flow_align == "right":
-                    cx = config.margin_left + (avail_w - row_content_width)
+            cx = flow_start_x if flow_mode else config.margin_left
 
             # Draw cells
             for c in range(config.cols):
@@ -1994,7 +2159,7 @@ class ImageGridApp:
                     metrics.main_height,
                     config.fit_mode,
                 )
-                this_gap_h = config.gap_h.to_cm(img_w_cm)
+                this_gap_h = config.gap_h.to_cm(metrics.main_width)
 
                 min_x, min_y, max_x, max_y = calculate_item_bounds(
                     config,
@@ -2008,11 +2173,23 @@ class ImageGridApp:
                 item_w = max_x - min_x
                 item_h = max_y - min_y
 
-                if config.layout_mode == "flow":
-                    main_l = cx
-                    main_t = cy + (current_row_h - item_h) / 2
+                if flow_mode and flow_h:
+                    cell_w = (
+                        flow_col_widths[c]
+                        if c < len(flow_col_widths)
+                        else metrics.main_width
+                    )
+                    item_draw_left = cx + (cell_w - item_w) / 2
+                    main_l = item_draw_left - min_x
                 else:
+                    # Non-flow horizontal axis keeps grid-aligned main images.
                     main_l = cx + (metrics.main_width - img_w_cm) / 2
+
+                if flow_mode and flow_v:
+                    item_draw_top = cy + (current_row_h - item_h) / 2
+                    main_t = item_draw_top - min_y
+                else:
+                    # Non-flow vertical axis keeps grid-aligned main images.
                     main_t = cy + (metrics.main_height - img_h_cm) / 2
 
                 has_crops = should_apply_crop(r, c, config)
@@ -2079,11 +2256,17 @@ class ImageGridApp:
                         img_h_cm,
                         border_offset_cm,
                         half_border,
+                        scale,
                     )
 
                 # Advance X position
-                if config.layout_mode == "flow":
-                    cx += item_w + this_gap_h
+                if flow_mode:
+                    w = (
+                        flow_col_widths[c]
+                        if c < len(flow_col_widths)
+                        else metrics.main_width
+                    )
+                    cx += w + this_gap_h
                 else:
                     cx += (
                         metrics.col_widths[c] + this_gap_h
@@ -2109,6 +2292,7 @@ class ImageGridApp:
         img_h_cm,
         border_offset_cm,
         half_border,
+        scale,
     ):
         """Draw crop region previews on the canvas."""
         disp = config.crop_display
@@ -2134,6 +2318,11 @@ class ImageGridApp:
         # Step 1: Draw crop source regions on main image
         # ----------------------
         for region in config.crop_regions:
+            # 領域ごとの枠線設定（Noneの場合はグローバル設定を使用）
+            show_cb = region.show_crop_border if region.show_crop_border is not None else config.show_crop_border
+            if not show_cb:
+                continue
+
             # Calculate crop region position (relative to main image)
             if region.mode == "ratio":
                 # Use ratio-based positioning
@@ -2161,6 +2350,13 @@ class ImageGridApp:
             crop_w = rw * img_w_cm
             crop_h = rh * img_h_cm
 
+            # 領域ごとの枠線設定
+            dash_style = region.crop_border_dash if region.crop_border_dash else config.crop_border_dash
+            dash_pattern = self._get_dash_pattern(dash_style)
+            border_width = region.crop_border_width if region.crop_border_width is not None else config.crop_border_width
+            # プレビュー用に太さをスケール（見やすくするため最低2px）
+            preview_width = max(2, int(border_width * scale * 0.5))
+
             # Draw crop region rectangle on main image
             color = "#%02x%02x%02x" % region.color
             canvas.create_rectangle(
@@ -2170,7 +2366,8 @@ class ImageGridApp:
                 ty(crop_t + crop_h),
                 fill="",
                 outline=color,
-                width=1,
+                width=preview_width,
+                dash=dash_pattern,
             )
 
             # Draw region name label
@@ -2325,14 +2522,24 @@ class ImageGridApp:
             fill_g = min(255, region.color[1] + 200)
             fill_b = min(255, region.color[2] + 200)
             fill_color = "#%02x%02x%02x" % (fill_r, fill_g, fill_b)
+
+            # 領域ごとの枠線設定（Noneの場合はグローバル設定を使用）
+            show_zb = region.show_zoom_border if region.show_zoom_border is not None else config.show_zoom_border
+            dash_style = region.zoom_border_dash if region.zoom_border_dash else config.zoom_border_dash
+            dash_pattern = self._get_dash_pattern(dash_style)
+            zb_width = region.zoom_border_width if region.zoom_border_width is not None else config.zoom_border_width
+            # プレビュー用に太さをスケール（見やすくするため最低2px）
+            preview_zb_width = max(2, int(zb_width * scale * 0.5))
+
             canvas.create_rectangle(
                 tx(c_l),
                 ty(c_t),
                 tx(c_l + c_w),
                 ty(c_t + c_h),
                 fill=fill_color,
-                outline=color,
-                width=1,
+                outline=color if show_zb else "",
+                width=preview_zb_width if show_zb else 1,
+                dash=dash_pattern if show_zb else (),
             )
 
             # Draw region name in zoomed preview
@@ -2522,6 +2729,21 @@ class ImageGridApp:
             region.gap = None
 
         region.show_zoomed = self.r_show_zoomed.get()
+
+        # 領域ごとの枠線設定を保存
+        scb = self.r_show_crop_border.get()
+        region.show_crop_border = True if scb == "true" else False if scb == "false" else None
+        cbw = self.r_crop_border_width.get().strip()
+        region.crop_border_width = float(cbw) if cbw else None
+        region.crop_border_shape = self.r_crop_border_shape.get() or None
+        region.crop_border_dash = self.r_crop_border_dash.get() or None
+
+        szb = self.r_show_zoom_border.get()
+        region.show_zoom_border = True if szb == "true" else False if szb == "false" else None
+        zbw = self.r_zoom_border_width.get().strip()
+        region.zoom_border_width = float(zbw) if zbw else None
+        region.zoom_border_shape = self.r_zoom_border_shape.get() or None
+        region.zoom_border_dash = self.r_zoom_border_dash.get() or None
 
         self._update_region_list()
         self._schedule_preview()

@@ -63,6 +63,7 @@ grid:
   arrangement: row
   cols: 3
   flow_align: center
+  flow_axis: both
   flow_vertical_align: center
   layout_mode: flow
   rows: 2

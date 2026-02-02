@@ -23,7 +23,7 @@ GUI でプレビューしながら調整するか、YAML 設定ファイルを�
 - rows×cols のグリッド
 - レイアウトモード
   - grid: 各セルに整列
-  - flow: 行ごとに“中身の実幅”で詰める（左右揃え・上下揃え対応）
+- flow: 行/列の“中身の実寸”で詰める（左右揃え・上下揃え・軸指定対応）
 - 余白（margin）、間隔（gap）
   - gap は cm 固定または scale（参照サイズ×倍率）
 
@@ -197,6 +197,7 @@ images/
 | grid           | layout_mode                                     | grid / flow                                   |
 | grid           | flow_align                                      | left / center / right（flow のみ）            |
 | grid           | flow_vertical_align                             | top / center / bottom（flow のみ）            |
+| grid           | flow_axis                                       | both / horizontal / vertical（flow のみ）     |
 | margin         | left/top/right/bottom                           | 余白（cm）                                    |
 | gap            | horizontal/vertical                             | 間隔（数値=cm、または {value, mode}）         |
 | image          | size_mode                                       | fit / fixed                                   |
