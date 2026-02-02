@@ -35,6 +35,7 @@ from pptx.enum.dml import MSO_LINE_DASH_STYLE
 
 CM_TO_EMU = 360000
 PT_TO_EMU = 12700
+SLIDE_SNAP_EPS_CM = 5e-4  # 0.005 mm: snap tiny ratio errors from rounded slide sizes
 
 SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp"}
 
@@ -46,18 +47,36 @@ SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", 
 
 def cm_to_emu(cm: float) -> int:
     """Convert centimeters to EMU (English Metric Units)."""
-    return int(cm * CM_TO_EMU)
+    return int(round(cm * CM_TO_EMU))
 
 
 def pt_to_emu(pt: float) -> int:
     """Convert points to EMU."""
-    return int(pt * PT_TO_EMU)
+    return int(round(pt * PT_TO_EMU))
 
 
 def pt_to_cm(pt: float) -> float:
     """Convert points to centimeters."""
     # 1 inch = 2.54 cm = 72 points
     return pt * (2.54 / 72.0)
+
+
+def emu_to_cm(emu: int) -> float:
+    """Convert EMU to centimeters."""
+    return emu / CM_TO_EMU
+
+
+def normalize_slide_size(config: "GridConfig") -> None:
+    """Snap slide size to common aspect ratios when rounding errors are tiny."""
+    if config.slide_width <= 0 or config.slide_height <= 0:
+        return
+
+    # Prefer keeping height and nudging width for common ratios.
+    for w, h in ((16, 9), (4, 3), (3, 2)):
+        target_w = config.slide_height * (w / h)
+        if abs(config.slide_width - target_w) <= SLIDE_SNAP_EPS_CM:
+            config.slide_width = target_w
+            return
 
 
 # =============================================================================
@@ -1430,6 +1449,8 @@ def add_crop_borders_to_image(
 
 def create_grid_presentation(config: GridConfig) -> str:
     """Create a PowerPoint presentation with images arranged in a grid layout."""
+    normalize_slide_size(config)
+
     # Use template if specified, otherwise create new presentation
     if config.template_path and Path(config.template_path).exists():
         prs = Presentation(config.template_path)
@@ -1437,6 +1458,10 @@ def create_grid_presentation(config: GridConfig) -> str:
         prs = Presentation()
         prs.slide_width = cm_to_emu(config.slide_width)
         prs.slide_height = cm_to_emu(config.slide_height)
+
+    # Keep layout math aligned to the actual slide size (template or EMU-rounded)
+    config.slide_width = emu_to_cm(prs.slide_width)
+    config.slide_height = emu_to_cm(prs.slide_height)
 
     # Get slide layout
     layout_index = min(config.slide_layout_index, len(prs.slide_layouts) - 1)

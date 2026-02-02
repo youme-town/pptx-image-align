@@ -44,6 +44,7 @@ from core import (
     calculate_grid_metrics,
     calculate_item_bounds,
     calculate_size_fit_static,
+    normalize_slide_size,
     should_apply_crop,
     pt_to_cm,
     load_crop_presets,
@@ -1971,6 +1972,7 @@ class ImageGridApp:
     def _update_preview(self):
         """Render the preview canvas."""
         config = self._get_current_config()
+        normalize_slide_size(config)
         canvas = self.preview_canvas
         canvas.delete("all")
 
