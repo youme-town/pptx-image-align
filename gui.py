@@ -1522,15 +1522,15 @@ class ImageGridApp:
     def _get_dash_pattern(self, dash_style: str):
         """Convert dash style string to Tkinter dash pattern."""
         if dash_style == "dash":
-            return (4, 2)
+            return (6, 3)
         elif dash_style == "dot":
-            return (1, 2)
+            return (2, 3)
         elif dash_style == "dash_dot":
-            return (4, 2, 1, 2)
+            return (6, 3, 2, 3)
         elif dash_style == "long_dash":
-            return (8, 4)
+            return (10, 5)
         elif dash_style == "long_dash_dot":
-            return (8, 4, 1, 4)
+            return (10, 5, 2, 5)
         else:
             return ()  # solid
 
@@ -2295,6 +2295,9 @@ class ImageGridApp:
         scale,
     ):
         """Draw crop region previews on the canvas."""
+        # ガード: img_w_cmやimg_h_cmが0の場合は描画をスキップ
+        if img_w_cm <= 0 or img_h_cm <= 0 or scale <= 0:
+            return
         disp = config.crop_display
         # 空クロップ（show_zoomed=False）はautoの位置計算から除外
         num_crops = sum(1 for r in config.crop_regions if r.show_zoomed)
@@ -2354,8 +2357,9 @@ class ImageGridApp:
             dash_style = region.crop_border_dash if region.crop_border_dash else config.crop_border_dash
             dash_pattern = self._get_dash_pattern(dash_style)
             border_width = region.crop_border_width if region.crop_border_width is not None else config.crop_border_width
-            # プレビュー用に太さをスケール（見やすくするため最低2px）
-            preview_width = max(2, int(border_width * scale * 0.5))
+            # プレビュー用の太さ（破線の場合は最低2pxで見やすく）
+            min_width = 2 if dash_pattern else 1
+            preview_width = max(min_width, min(3, int(border_width + 0.5)))
 
             # Draw crop region rectangle on main image
             color = "#%02x%02x%02x" % region.color
@@ -2528,8 +2532,9 @@ class ImageGridApp:
             dash_style = region.zoom_border_dash if region.zoom_border_dash else config.zoom_border_dash
             dash_pattern = self._get_dash_pattern(dash_style)
             zb_width = region.zoom_border_width if region.zoom_border_width is not None else config.zoom_border_width
-            # プレビュー用に太さをスケール（見やすくするため最低2px）
-            preview_zb_width = max(2, int(zb_width * scale * 0.5))
+            # プレビュー用の太さ（破線の場合は最低2pxで見やすく）
+            min_width = 2 if dash_pattern else 1
+            preview_zb_width = max(min_width, min(3, int(zb_width + 0.5)))
 
             canvas.create_rectangle(
                 tx(c_l),
@@ -2673,6 +2678,7 @@ class ImageGridApp:
     def _generate(self):
         """PPTXファイルを生成する"""
         config = self._get_current_config()
+
 
         # Validate inputs
         if self.input_mode.get() == "images":

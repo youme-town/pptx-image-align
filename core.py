@@ -1246,28 +1246,23 @@ def calculate_flow_row_heights(
     image_grid: List[List[Optional[str]]],
     border_offset_cm: float,
 ) -> List[float]:
-    """Calculate maximum content height for each row in flow mode."""
+    """Calculate maximum content height for each row in flow mode.
+
+    Empty cells are excluded from the calculation so that rows shrink
+    to fit only the actual images present.
+    """
     row_heights = []
 
     for row_idx in range(config.rows):
         row_max_h = 0.0
         for col_idx in range(config.cols):
             image_path = _get_grid_cell_image(image_grid, row_idx, col_idx)
+            # Skip empty cells - they should not affect row height in flow mode
             if image_path is None or image_path == "__PLACEHOLDER__":
-                ow, oh = _placeholder_override_size(config, metrics)
-                min_x, min_y, max_x, max_y = calculate_item_bounds(
-                    config,
-                    metrics,
-                    "dummy",
-                    row_idx,
-                    col_idx,
-                    border_offset_cm,
-                    override_size=(ow, oh),
-                )
-            else:
-                min_x, min_y, max_x, max_y = calculate_item_bounds(
-                    config, metrics, image_path, row_idx, col_idx, border_offset_cm
-                )
+                continue
+            min_x, min_y, max_x, max_y = calculate_item_bounds(
+                config, metrics, image_path, row_idx, col_idx, border_offset_cm
+            )
             item_h = max_y - min_y
             row_max_h = max(row_max_h, item_h)
 
@@ -1282,28 +1277,23 @@ def calculate_flow_col_widths(
     image_grid: List[List[Optional[str]]],
     border_offset_cm: float,
 ) -> List[float]:
-    """Calculate maximum content width for each column in flow mode."""
+    """Calculate maximum content width for each column in flow mode.
+
+    Empty cells are excluded from the calculation so that columns shrink
+    to fit only the actual images present.
+    """
     col_widths = []
 
     for col_idx in range(config.cols):
         col_max_w = 0.0
         for row_idx in range(config.rows):
             image_path = _get_grid_cell_image(image_grid, row_idx, col_idx)
+            # Skip empty cells - they should not affect column width in flow mode
             if image_path is None or image_path == "__PLACEHOLDER__":
-                ow, oh = _placeholder_override_size(config, metrics)
-                min_x, min_y, max_x, max_y = calculate_item_bounds(
-                    config,
-                    metrics,
-                    "dummy",
-                    row_idx,
-                    col_idx,
-                    border_offset_cm,
-                    override_size=(ow, oh),
-                )
-            else:
-                min_x, min_y, max_x, max_y = calculate_item_bounds(
-                    config, metrics, image_path, row_idx, col_idx, border_offset_cm
-                )
+                continue
+            min_x, min_y, max_x, max_y = calculate_item_bounds(
+                config, metrics, image_path, row_idx, col_idx, border_offset_cm
+            )
             item_w = max_x - min_x
             col_max_w = max(col_max_w, item_w)
 
