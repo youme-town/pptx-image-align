@@ -21,6 +21,7 @@ Usage:
   python gui.py config.yaml        - Launch with pre-loaded config
 """
 
+import os
 import sys
 import copy
 import tkinter as tk
@@ -2743,7 +2744,8 @@ class ImageGridApp:
 
         try:
             create_grid_presentation(config)
-            messagebox.showinfo("成功", f"PPTXを生成しました: {config.output}")
+            if messagebox.askyesno("成功", f"PPTXを生成しました: {config.output}\n\nファイルを開きますか？"):
+                os.startfile(os.path.abspath(config.output))
         except Exception as e:
             messagebox.showerror("エラー", f"生成に失敗しました: {e}")
 
