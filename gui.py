@@ -932,6 +932,12 @@ class ImageGridApp:
         ttk.Button(r_btn_frame, text="削除", command=self._remove_region).pack(
             side=tk.LEFT, padx=2
         )
+        ttk.Button(r_btn_frame, text="↑上へ", command=self._move_region_up).pack(
+            side=tk.LEFT, padx=2
+        )
+        ttk.Button(r_btn_frame, text="↓下へ", command=self._move_region_down).pack(
+            side=tk.LEFT, padx=2
+        )
 
         self.region_tree = ttk.Treeview(
             f_reg, columns=("name", "xywh", "align"), show="headings", height=4
@@ -1445,6 +1451,50 @@ class ImageGridApp:
             if 0 <= idx < len(self.crop_regions):
                 self.crop_regions.pop(idx)
         self._update_region_list()
+        self._schedule_preview()
+        self._save_state()
+
+    def _move_region_up(self):
+        """選択したクロップ領域を1つ上へ移動"""
+        sel = self.region_tree.selection()
+        if not sel:
+            return
+        idx = int(sel[0])
+        if idx <= 0 or idx >= len(self.crop_regions):
+            return
+
+        self.crop_regions[idx], self.crop_regions[idx - 1] = (
+            self.crop_regions[idx - 1],
+            self.crop_regions[idx],
+        )
+        self._update_region_list()
+        new_idx = idx - 1
+        self.region_tree.selection_set(str(new_idx))
+        self.region_tree.focus(str(new_idx))
+        self.region_tree.see(str(new_idx))
+        self._on_region_select(None)
+        self._schedule_preview()
+        self._save_state()
+
+    def _move_region_down(self):
+        """選択したクロップ領域を1つ下へ移動"""
+        sel = self.region_tree.selection()
+        if not sel:
+            return
+        idx = int(sel[0])
+        if idx < 0 or idx >= len(self.crop_regions) - 1:
+            return
+
+        self.crop_regions[idx], self.crop_regions[idx + 1] = (
+            self.crop_regions[idx + 1],
+            self.crop_regions[idx],
+        )
+        self._update_region_list()
+        new_idx = idx + 1
+        self.region_tree.selection_set(str(new_idx))
+        self.region_tree.focus(str(new_idx))
+        self.region_tree.see(str(new_idx))
+        self._on_region_select(None)
         self._schedule_preview()
         self._save_state()
 
