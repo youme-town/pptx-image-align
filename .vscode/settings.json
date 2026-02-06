@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^C:/Users/maeda/Documents/py_scripts/pptx-image-align/\\.venv/Scripts/python\\.exe c:/Users/maeda/Documents/py_scripts/pptx-image-align/gui\\.py$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

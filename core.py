@@ -16,15 +16,17 @@ import re
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict
 from dataclasses import dataclass, field
 
 import yaml
 from PIL import Image
 from pptx import Presentation
-from pptx.util import Emu
+from pptx.util import Emu, Pt
 from pptx.dml.color import RGBColor
-from pptx.enum.shapes import MSO_SHAPE
+from pptx.enum.shapes import MSO_SHAPE, MSO_CONNECTOR
+from pptx.enum.text import PP_ALIGN
+from pptx.enum.dml import MSO_LINE_DASH_STYLE
 
 
 # =============================================================================
@@ -33,6 +35,9 @@ from pptx.enum.shapes import MSO_SHAPE
 
 CM_TO_EMU = 360000
 PT_TO_EMU = 12700
+SLIDE_SNAP_EPS_CM = 5e-4  # 0.005 mm: snap tiny ratio errors from rounded slide sizes
+
+SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp"}
 
 
 # =============================================================================
@@ -42,18 +47,36 @@ PT_TO_EMU = 12700
 
 def cm_to_emu(cm: float) -> int:
     """Convert centimeters to EMU (English Metric Units)."""
-    return int(cm * CM_TO_EMU)
+    return int(round(cm * CM_TO_EMU))
 
 
 def pt_to_emu(pt: float) -> int:
     """Convert points to EMU."""
-    return int(pt * PT_TO_EMU)
+    return int(round(pt * PT_TO_EMU))
 
 
 def pt_to_cm(pt: float) -> float:
     """Convert points to centimeters."""
     # 1 inch = 2.54 cm = 72 points
     return pt * (2.54 / 72.0)
+
+
+def emu_to_cm(emu: int) -> float:
+    """Convert EMU to centimeters."""
+    return emu / CM_TO_EMU
+
+
+def normalize_slide_size(config: "GridConfig") -> None:
+    """Snap slide size to common aspect ratios when rounding errors are tiny."""
+    if config.slide_width <= 0 or config.slide_height <= 0:
+        return
+
+    # Prefer keeping height and nudging width for common ratios.
+    for w, h in ((16, 9), (4, 3), (3, 2)):
+        target_w = config.slide_height * (w / h)
+        if abs(config.slide_width - target_w) <= SLIDE_SNAP_EPS_CM:
+            config.slide_width = target_w
+            return
 
 
 # =============================================================================
@@ -74,6 +97,29 @@ class CropRegion:
     align: str = "auto"  # 'auto', 'start', 'center', 'end'
     offset: float = 0.0  # cm, offset from alignment anchor
     gap: Optional[float] = None  # cm, overrides global main-crop gap if set
+
+    # NEW: ratio-based crop (robust across different image pixel sizes)
+    mode: str = "px"  # 'px' or 'ratio'
+    x_ratio: Optional[float] = None
+    y_ratio: Optional[float] = None
+    width_ratio: Optional[float] = None
+    height_ratio: Optional[float] = None
+
+    # 空クロップ: 枠線のみ表示し、拡大画像は表示しない
+    show_zoomed: bool = True
+
+    # 領域ごとの枠線設定 (Noneの場合はグローバル設定を使用)
+    # 元画像上の枠線 (crop border)
+    show_crop_border: Optional[bool] = None
+    crop_border_width: Optional[float] = None
+    crop_border_shape: Optional[str] = None  # 'rectangle', 'rounded'
+    crop_border_dash: Optional[str] = None  # 'solid', 'dash', 'dot', 'dash_dot'
+
+    # 拡大画像の枠線 (zoom border)
+    show_zoom_border: Optional[bool] = None
+    zoom_border_width: Optional[float] = None
+    zoom_border_shape: Optional[str] = None  # 'rectangle', 'rounded'
+    zoom_border_dash: Optional[str] = None  # 'solid', 'dash', 'dot', 'dash_dot'
 
 
 @dataclass
@@ -103,6 +149,52 @@ class CropDisplayConfig:
 
 
 @dataclass
+class CropOverride:
+    """Per-cell crop override (row, col) -> regions. If regions is empty, crop is disabled for that cell."""
+
+    row: int
+    col: int
+    regions: List[CropRegion] = field(default_factory=list)
+
+
+@dataclass
+class CropPreset:
+    """クロッププリセット"""
+
+    name: str
+    regions: List[CropRegion] = field(default_factory=list)
+    description: str = ""
+    display_position: str = "right"  # 'right' or 'bottom'
+
+
+@dataclass
+class LabelConfig:
+    """テキストラベル/キャプションの設定"""
+
+    enabled: bool = False
+    mode: str = "filename"  # 'filename', 'number', 'custom'
+    position: str = "bottom"  # 'top', 'bottom'
+    font_name: str = "Arial"
+    font_size: float = 10.0  # pt
+    font_color: Tuple[int, int, int] = (0, 0, 0)
+    font_bold: bool = False
+    number_format: str = "({n})"  # 連番フォーマット
+    custom_texts: List[str] = field(default_factory=list)  # カスタムモード用
+    gap: float = 0.1  # cm - ラベルと画像の間隔
+
+
+@dataclass
+class ConnectorConfig:
+    """クロップ領域と拡大画像を結ぶ連結線の設定"""
+
+    show: bool = False
+    width: float = 1.0  # pt
+    color: Optional[Tuple[int, int, int]] = None  # Noneならクロップ領域の色を使用
+    style: str = "straight"  # 'straight' or 'elbow'
+    dash_style: str = "solid"  # 'solid', 'dash', 'dot'
+
+
+@dataclass
 class GridConfig:
     """Main configuration for grid-based image layout."""
 
@@ -129,6 +221,7 @@ class GridConfig:
     layout_mode: str = "grid"  # 'grid' (aligned) or 'flow' (compact)
     flow_align: str = "left"  # 'left', 'center', 'right'
     flow_vertical_align: str = "center"  # 'top', 'center', 'bottom'
+    flow_axis: str = "both"  # 'both', 'horizontal', 'vertical'
 
     # Image sizing
     size_mode: str = "fit"  # 'fit' or 'fixed'
@@ -141,19 +234,37 @@ class GridConfig:
     crop_regions: List[CropRegion] = field(default_factory=list)
     crop_rows: Optional[List[int]] = None
     crop_cols: Optional[List[int]] = None
+    crop_targets: Optional[List[Tuple[int, int]]] = None  # NEW: explicit (row, col)
+
+    # NEW: per-cell overrides
+    crop_overrides: List[CropOverride] = field(default_factory=list)
+
     crop_display: CropDisplayConfig = field(default_factory=CropDisplayConfig)
 
     # Border settings
     show_crop_border: bool = True
     crop_border_width: float = 1.5
     crop_border_shape: str = "rectangle"  # 'rectangle' or 'rounded'
+    crop_border_dash: str = "solid"  # 'solid', 'dash', 'dot', 'dash_dot'
     show_zoom_border: bool = True
     zoom_border_width: float = 1.5
     zoom_border_shape: str = "rectangle"  # 'rectangle' or 'rounded'
+    zoom_border_dash: str = "solid"  # 'solid', 'dash', 'dot', 'dash_dot'
 
     # Input/Output
     folders: List[str] = field(default_factory=list)
+    images: Optional[List[str]] = None  # NEW: explicit images (row-major)
     output: str = "output.pptx"
+
+    # Label settings
+    label_config: LabelConfig = field(default_factory=LabelConfig)
+
+    # Template settings
+    template_path: Optional[str] = None
+    slide_layout_index: int = 6  # Default to blank layout
+
+    # Connector settings
+    connector: ConnectorConfig = field(default_factory=ConnectorConfig)
 
 
 @dataclass
@@ -198,6 +309,36 @@ def parse_gap(data) -> GapConfig:
     return GapConfig(0.5, "cm")
 
 
+def _parse_crop_region_dict(r: dict, fallback_name: str) -> CropRegion:
+    mode = r.get("mode", "px")
+    return CropRegion(
+        x=r.get("x", 0),
+        y=r.get("y", 0),
+        width=r.get("width", 100),
+        height=r.get("height", 100),
+        color=parse_color(r.get("color", "#FF0000")),
+        name=r.get("name", fallback_name),
+        align=r.get("align", "auto"),
+        offset=r.get("offset", 0.0),
+        gap=r.get("gap", None),
+        mode=mode,
+        x_ratio=r.get("x_ratio"),
+        y_ratio=r.get("y_ratio"),
+        width_ratio=r.get("width_ratio"),
+        height_ratio=r.get("height_ratio"),
+        show_zoomed=r.get("show_zoomed", True),
+        # 領域ごとの枠線設定
+        show_crop_border=r.get("show_crop_border"),
+        crop_border_width=r.get("crop_border_width"),
+        crop_border_shape=r.get("crop_border_shape"),
+        crop_border_dash=r.get("crop_border_dash"),
+        show_zoom_border=r.get("show_zoom_border"),
+        zoom_border_width=r.get("zoom_border_width"),
+        zoom_border_shape=r.get("zoom_border_shape"),
+        zoom_border_dash=r.get("zoom_border_dash"),
+    )
+
+
 def load_config(config_path: str) -> GridConfig:
     """Load configuration from a YAML file."""
     with open(config_path, "r", encoding="utf-8") as f:
@@ -222,6 +363,7 @@ def load_config(config_path: str) -> GridConfig:
         config.flow_vertical_align = grid.get(
             "flow_vertical_align", config.flow_vertical_align
         )
+        config.flow_axis = grid.get("flow_axis", config.flow_axis)
 
     # Margin settings
     if "margin" in data:
@@ -260,38 +402,51 @@ def load_config(config_path: str) -> GridConfig:
     if "crop" in data:
         crop = data["crop"]
 
-        # Parse crop regions
+        # Parse crop regions (global)
         if "regions" in crop:
             for i, r in enumerate(crop["regions"]):
-                region = CropRegion(
-                    x=r.get("x", 0),
-                    y=r.get("y", 0),
-                    width=r.get("width", 100),
-                    height=r.get("height", 100),
-                    color=parse_color(r.get("color", "#FF0000")),
-                    name=r.get("name", f"crop_{i + 1}"),
-                    align=r.get("align", "auto"),
-                    offset=r.get("offset", 0.0),
-                    gap=r.get("gap", None),
-                )
-                config.crop_regions.append(region)
+                config.crop_regions.append(_parse_crop_region_dict(r, f"crop_{i + 1}"))
         elif "region" in crop:
             r = crop["region"]
-            region = CropRegion(
-                x=r.get("x", 0),
-                y=r.get("y", 0),
-                width=r.get("width", 100),
-                height=r.get("height", 100),
-                color=parse_color(r.get("color", "#FF0000")),
-                name="crop_1",
-                align=r.get("align", "auto"),
-                offset=r.get("offset", 0.0),
-                gap=r.get("gap", None),
-            )
-            config.crop_regions.append(region)
+            config.crop_regions.append(_parse_crop_region_dict(r, "crop_1"))
 
         config.crop_rows = crop.get("rows")
         config.crop_cols = crop.get("cols")
+
+        # NEW: explicit targets
+        targets = crop.get("targets")
+        if targets is not None:
+            parsed: List[Tuple[int, int]] = []
+            for t in targets:
+                if isinstance(t, str) and "," in t:
+                    rs, cs = t.split(",", 1)
+                    parsed.append((int(rs.strip()), int(cs.strip())))
+                elif isinstance(t, dict) and "row" in t and "col" in t:
+                    parsed.append((int(t["row"]), int(t["col"])))
+            config.crop_targets = parsed if parsed else []
+
+        # NEW: per-cell overrides
+        overrides = crop.get("overrides")
+        if isinstance(overrides, list):
+            parsed_overrides: List[CropOverride] = []
+            for o in overrides:
+                if not isinstance(o, dict):
+                    continue
+                if "row" not in o or "col" not in o:
+                    continue
+                regions_data = o.get("regions") or []
+                regions: List[CropRegion] = []
+                for i, rr in enumerate(regions_data):
+                    if isinstance(rr, dict):
+                        regions.append(
+                            _parse_crop_region_dict(
+                                rr, f"cell_{int(o['row'])}_{int(o['col'])}_{i + 1}"
+                            )
+                        )
+                parsed_overrides.append(
+                    CropOverride(row=int(o["row"]), col=int(o["col"]), regions=regions)
+                )
+            config.crop_overrides = parsed_overrides
 
         # Crop display settings
         if "display" in crop:
@@ -326,16 +481,50 @@ def load_config(config_path: str) -> GridConfig:
             config.show_crop_border = cb.get("show", config.show_crop_border)
             config.crop_border_width = cb.get("width", config.crop_border_width)
             config.crop_border_shape = cb.get("shape", config.crop_border_shape)
+            config.crop_border_dash = cb.get("dash", config.crop_border_dash)
         if "zoom" in border:
             zb = border["zoom"]
             config.show_zoom_border = zb.get("show", config.show_zoom_border)
             config.zoom_border_width = zb.get("width", config.zoom_border_width)
             config.zoom_border_shape = zb.get("shape", config.zoom_border_shape)
+            config.zoom_border_dash = zb.get("dash", config.zoom_border_dash)
 
     # Input/Output
     if "folders" in data:
         config.folders = data["folders"]
+    config.images = data.get("images")  # NEW
     config.output = data.get("output", config.output)
+
+    # Label settings
+    if "label" in data:
+        lbl = data["label"]
+        config.label_config.enabled = lbl.get("enabled", False)
+        config.label_config.mode = lbl.get("mode", "filename")
+        config.label_config.position = lbl.get("position", "bottom")
+        config.label_config.font_name = lbl.get("font_name", "Arial")
+        config.label_config.font_size = lbl.get("font_size", 10.0)
+        if "font_color" in lbl:
+            config.label_config.font_color = parse_color(lbl["font_color"])
+        config.label_config.font_bold = lbl.get("font_bold", False)
+        config.label_config.number_format = lbl.get("number_format", "({n})")
+        config.label_config.custom_texts = lbl.get("custom_texts", [])
+        config.label_config.gap = lbl.get("gap", 0.1)
+
+    # Template settings
+    if "template" in data:
+        tpl = data["template"]
+        config.template_path = tpl.get("path")
+        config.slide_layout_index = tpl.get("layout_index", 6)
+
+    # Connector settings
+    if "connector" in data:
+        conn = data["connector"]
+        config.connector.show = conn.get("show", False)
+        config.connector.width = conn.get("width", 1.0)
+        if "color" in conn and conn["color"]:
+            config.connector.color = parse_color(conn["color"])
+        config.connector.style = conn.get("style", "straight")
+        config.connector.dash_style = conn.get("dash_style", "solid")
 
     return config
 
@@ -351,6 +540,7 @@ def save_config(config: GridConfig, output_path: str) -> None:
             "layout_mode": config.layout_mode,
             "flow_align": config.flow_align,
             "flow_vertical_align": config.flow_vertical_align,
+            "flow_axis": config.flow_axis,
         },
         "margin": {
             "left": config.margin_left,
@@ -369,17 +559,43 @@ def save_config(config: GridConfig, output_path: str) -> None:
             "height": config.image_height,
         },
         "folders": config.folders,
+        "images": config.images,  # NEW
         "output": config.output,
+        "label": {
+            "enabled": config.label_config.enabled,
+            "mode": config.label_config.mode,
+            "position": config.label_config.position,
+            "font_name": config.label_config.font_name,
+            "font_size": config.label_config.font_size,
+            "font_color": list(config.label_config.font_color),
+            "font_bold": config.label_config.font_bold,
+            "number_format": config.label_config.number_format,
+            "custom_texts": config.label_config.custom_texts,
+            "gap": config.label_config.gap,
+        },
+        "template": {
+            "path": config.template_path,
+            "layout_index": config.slide_layout_index,
+        },
+        "connector": {
+            "show": config.connector.show,
+            "width": config.connector.width,
+            "color": list(config.connector.color) if config.connector.color else None,
+            "style": config.connector.style,
+            "dash_style": config.connector.dash_style,
+        },
         "border": {
             "crop": {
                 "show": config.show_crop_border,
                 "width": config.crop_border_width,
                 "shape": config.crop_border_shape,
+                "dash": config.crop_border_dash,
             },
             "zoom": {
                 "show": config.show_zoom_border,
                 "width": config.zoom_border_width,
                 "shape": config.zoom_border_shape,
+                "dash": config.zoom_border_dash,
             },
         },
         "crop": {
@@ -394,11 +610,68 @@ def save_config(config: GridConfig, output_path: str) -> None:
                     "align": r.align,
                     "offset": r.offset,
                     "gap": r.gap,
+                    "mode": r.mode,
+                    "x_ratio": r.x_ratio,
+                    "y_ratio": r.y_ratio,
+                    "width_ratio": r.width_ratio,
+                    "height_ratio": r.height_ratio,
+                    "show_zoomed": r.show_zoomed,
+                    # 領域ごとの枠線設定
+                    "show_crop_border": r.show_crop_border,
+                    "crop_border_width": r.crop_border_width,
+                    "crop_border_shape": r.crop_border_shape,
+                    "crop_border_dash": r.crop_border_dash,
+                    "show_zoom_border": r.show_zoom_border,
+                    "zoom_border_width": r.zoom_border_width,
+                    "zoom_border_shape": r.zoom_border_shape,
+                    "zoom_border_dash": r.zoom_border_dash,
                 }
                 for r in config.crop_regions
             ],
             "rows": config.crop_rows,
             "cols": config.crop_cols,
+            "targets": (
+                [{"row": r, "col": c} for (r, c) in config.crop_targets]
+                if config.crop_targets is not None
+                else None
+            ),
+            # NEW
+            "overrides": [
+                {
+                    "row": o.row,
+                    "col": o.col,
+                    "regions": [
+                        {
+                            "name": r.name,
+                            "x": r.x,
+                            "y": r.y,
+                            "width": r.width,
+                            "height": r.height,
+                            "color": list(r.color),
+                            "align": r.align,
+                            "offset": r.offset,
+                            "gap": r.gap,
+                            "mode": r.mode,
+                            "x_ratio": r.x_ratio,
+                            "y_ratio": r.y_ratio,
+                            "width_ratio": r.width_ratio,
+                            "height_ratio": r.height_ratio,
+                            "show_zoomed": r.show_zoomed,
+                            # 領域ごとの枠線設定
+                            "show_crop_border": r.show_crop_border,
+                            "crop_border_width": r.crop_border_width,
+                            "crop_border_shape": r.crop_border_shape,
+                            "crop_border_dash": r.crop_border_dash,
+                            "show_zoom_border": r.show_zoom_border,
+                            "zoom_border_width": r.zoom_border_width,
+                            "zoom_border_shape": r.zoom_border_shape,
+                            "zoom_border_dash": r.zoom_border_dash,
+                        }
+                        for r in (o.regions or [])
+                    ],
+                }
+                for o in (config.crop_overrides or [])
+            ],
             "display": {
                 "position": config.crop_display.position,
                 "size": config.crop_display.size,
@@ -435,24 +708,100 @@ def extract_number_from_filename(filename: str) -> int:
 
 def get_sorted_images(folder_path: str) -> List[str]:
     """Get sorted list of image files from a folder."""
-    supported_extensions = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp"}
-    folder = Path(folder_path)
-    if not folder.exists():
+    p = Path(folder_path)
+    if not p.exists():
         return []
+
+    # NEW: allow a single image path
+    if p.is_file():
+        return [str(p)] if p.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS else []
 
     image_files = [
         f
-        for f in folder.iterdir()
-        if f.is_file() and f.suffix.lower() in supported_extensions
+        for f in p.iterdir()
+        if f.is_file() and f.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
     ]
     image_files.sort(key=lambda f: extract_number_from_filename(f.stem))
     return [str(f) for f in image_files]
 
 
+def build_image_grid(config: GridConfig) -> List[List[Optional[str]]]:
+    """
+    Build a unified rows x cols image grid.
+    Priority:
+      1) config.images (row-major)
+      2) config.folders interpreted by config.arrangement ('row' or 'col')
+    Missing cells are None.
+    """
+    rows = max(1, int(config.rows))
+    cols = max(1, int(config.cols))
+    grid: List[List[Optional[str]]] = [[None for _ in range(cols)] for _ in range(rows)]
+
+    # 1) Explicit images (row-major)
+    if config.images:
+        for idx, p in enumerate(config.images):
+            r = idx // cols
+            c = idx % cols
+            if 0 <= r < rows and 0 <= c < cols:
+                grid[r][c] = p
+        return grid
+
+    # 2) Folders (row/col)
+    folders = config.folders or []
+    if config.arrangement == "col":
+        # folders[col] -> images down rows
+        for c in range(min(cols, len(folders))):
+            imgs = get_sorted_images(folders[c])
+            for r in range(min(rows, len(imgs))):
+                grid[r][c] = imgs[r]
+    else:
+        # folders[row] -> images across cols
+        for r in range(min(rows, len(folders))):
+            imgs = get_sorted_images(folders[r])
+            for c in range(min(cols, len(imgs))):
+                grid[r][c] = imgs[c]
+
+    return grid
+
+
+def _clamp_int(v: int, lo: int, hi: int) -> int:
+    return max(lo, min(hi, v))
+
+
+def resolve_crop_box(
+    region: CropRegion, img_w_px: int, img_h_px: int
+) -> Tuple[int, int, int, int]:
+    """
+    Resolve CropRegion to pixel box (x, y, w, h).
+    Supports region.mode == 'ratio'.
+    """
+    if region.mode == "ratio":
+        xr = 0.0 if region.x_ratio is None else float(region.x_ratio)
+        yr = 0.0 if region.y_ratio is None else float(region.y_ratio)
+        wr = 0.0 if region.width_ratio is None else float(region.width_ratio)
+        hr = 0.0 if region.height_ratio is None else float(region.height_ratio)
+
+        x = int(round(xr * img_w_px))
+        y = int(round(yr * img_h_px))
+        w = int(round(wr * img_w_px))
+        h = int(round(hr * img_h_px))
+    else:
+        x, y, w, h = region.x, region.y, region.width, region.height
+
+    # clamp
+    x = _clamp_int(x, 0, max(0, img_w_px))
+    y = _clamp_int(y, 0, max(0, img_h_px))
+    w = _clamp_int(w, 0, max(0, img_w_px - x))
+    h = _clamp_int(h, 0, max(0, img_h_px - y))
+    return x, y, w, h
+
+
 def crop_image(image_path: str, region: CropRegion, output_path: str) -> str:
     """Crop an image according to a CropRegion and save to output_path."""
     with Image.open(image_path) as img:
-        box = (region.x, region.y, region.x + region.width, region.y + region.height)
+        img_w, img_h = img.size
+        x, y, w, h = resolve_crop_box(region, img_w, img_h)
+        box = (x, y, x + w, y + h)
         cropped = img.crop(box)
         cropped.save(output_path)
     return output_path
@@ -469,10 +818,30 @@ def get_image_dimensions(image_path: str) -> Tuple[int, int]:
 # =============================================================================
 
 
+def get_crop_regions_for_cell(
+    row: int, col: int, config: GridConfig
+) -> List[CropRegion]:
+    """Return crop regions for a specific cell. Per-cell override (if present) takes priority."""
+    for o in config.crop_overrides or []:
+        if o.row == row and o.col == col:
+            return o.regions or []
+    return config.crop_regions or []
+
+
 def should_apply_crop(row: int, col: int, config: GridConfig) -> bool:
     """Determine if crop regions should be applied to a specific cell."""
+    # Per-cell override takes absolute priority (including disabling by empty list)
+    for o in config.crop_overrides or []:
+        if o.row == row and o.col == col:
+            return bool(o.regions)
+
     if not config.crop_regions:
         return False
+
+    # explicit targets take priority
+    if config.crop_targets is not None:
+        return (row, col) in set(config.crop_targets)
+
     if config.crop_rows is not None and row not in config.crop_rows:
         return False
     if config.crop_cols is not None and col not in config.crop_cols:
@@ -536,23 +905,17 @@ def calculate_grid_metrics(config: GridConfig) -> LayoutMetrics:
     avail_w_for_cells = total_grid_w - (gap_h_val * (config.cols - 1))
     avail_h_for_cells = total_grid_h - (gap_v_val * (config.rows - 1))
 
-    # Determine which cells have crops
-    has_crops = len(config.crop_regions) > 0
-    expanded_cols = set()
-    expanded_rows = set()
-    if has_crops:
-        expanded_cols = (
-            set(range(config.cols))
-            if config.crop_cols is None
-            else set(config.crop_cols)
-        )
-        expanded_rows = (
-            set(range(config.rows))
-            if config.crop_rows is None
-            else set(config.crop_rows)
-        )
-    num_exp_cols = len([c for c in range(config.cols) if c in expanded_cols])
-    num_exp_rows = len([r for r in range(config.rows) if r in expanded_rows])
+    # Determine which cells have crops (global or per-cell)
+    expanded_cols: set[int] = set()
+    expanded_rows: set[int] = set()
+    for r in range(max(1, config.rows)):
+        for c in range(max(1, config.cols)):
+            if should_apply_crop(r, c, config):
+                expanded_cols.add(c)
+                expanded_rows.add(r)
+
+    num_exp_cols = len(expanded_cols)
+    num_exp_rows = len(expanded_rows)
 
     disp = config.crop_display
     gap_mc = disp.main_crop_gap.to_cm(est_main_w)
@@ -649,7 +1012,10 @@ def calculate_item_bounds(
     Calculate bounding box of an item (main image + crops) relative to main image top-left (0,0).
     Returns (min_x, min_y, max_x, max_y).
     """
-    has_crops = should_apply_crop(row_idx, col_idx, config)
+    crop_regions = get_crop_regions_for_cell(row_idx, col_idx, config)
+    has_crops = bool(crop_regions) and should_apply_crop(row_idx, col_idx, config)
+    # show_zoomed=False の領域は拡大画像を描画しないため、bounds（auto配置）には含めない
+    zoom_regions = [r for r in crop_regions if getattr(r, "show_zoomed", True)]
 
     if override_size:
         orig_w, orig_h = override_size
@@ -662,10 +1028,20 @@ def calculate_item_bounds(
 
     min_x, min_y = 0.0, 0.0
     max_x, max_y = orig_w, orig_h
-    half_border = border_offset_cm / 2.0 if config.show_zoom_border else 0.0
 
-    if has_crops and config.crop_regions:
-        num_crops = len(config.crop_regions)
+    # PowerPointの線は図形境界の外側に「半分」出るため、配置計算上は外形を膨らませる
+    half_zoom_border = border_offset_cm / 2.0 if config.show_zoom_border else 0.0
+
+    # 元画像上のクロップ枠線も同様に外側へ半分出る（端揃え時のはみ出し対策）
+    if has_crops and config.show_crop_border:
+        half_crop_border = pt_to_cm(config.crop_border_width) / 2.0
+        min_x -= half_crop_border
+        min_y -= half_crop_border
+        max_x += half_crop_border
+        max_y += half_crop_border
+
+    if has_crops and zoom_regions:
+        num_crops = len(zoom_regions)
         disp = config.crop_display
         actual_gap_mc = disp.main_crop_gap.to_cm(
             orig_w if disp.position == "right" else orig_h
@@ -681,8 +1057,7 @@ def calculate_item_bounds(
             actual_gap_mc += border_offset_cm
             actual_gap_cc += border_offset_cm
 
-        for crop_idx, region in enumerate(config.crop_regions):
-            # Calculate crop size
+        for crop_idx, region in enumerate(zoom_regions):
             cw, ch = _calculate_crop_size(
                 config,
                 metrics,
@@ -695,7 +1070,6 @@ def calculate_item_bounds(
                 override_size,
             )
 
-            # Calculate position
             this_gap_mc = region.gap if region.gap is not None else actual_gap_mc
             if region.gap is not None and config.show_zoom_border:
                 this_gap_mc += border_offset_cm
@@ -709,10 +1083,10 @@ def calculate_item_bounds(
                     orig_h,
                     ch,
                     actual_gap_cc,
-                    half_border,
+                    half_zoom_border,
                     disp,
                 )
-            else:  # bottom
+            else:
                 c_top = orig_h + this_gap_mc
                 c_left = _calculate_crop_horizontal_position(
                     region,
@@ -721,15 +1095,15 @@ def calculate_item_bounds(
                     orig_w,
                     cw,
                     actual_gap_cc,
-                    half_border,
+                    half_zoom_border,
                     disp,
                 )
 
-            # Update bounds
-            min_x = min(min_x, c_left)
-            min_y = min(min_y, c_top)
-            max_x = max(max_x, c_left + cw)
-            max_y = max(max_y, c_top + ch)
+            # 拡大画像の枠線（zoom border）が外側へ半分出るのを反映
+            min_x = min(min_x, c_left - half_zoom_border)
+            min_y = min(min_y, c_top - half_zoom_border)
+            max_x = max(max_x, c_left + cw + half_zoom_border)
+            max_y = max(max_y, c_top + ch + half_zoom_border)
 
         if disp.position == "bottom":
             max_y += actual_gap_cb
@@ -817,15 +1191,20 @@ def _calculate_crop_vertical_position(
     elif region.align == "end":
         return orig_h - ch + region.offset - half_border
     else:  # auto
-        if disp.scale is not None or disp.size is not None:
-            return crop_idx * (ch + actual_gap_cc)
+        # 最初と最後のクロップは端に揃える（pin ends）
+        if crop_idx == 0:
+            return 0.0 + half_border
+        elif num_crops > 1 and crop_idx == num_crops - 1:
+            return orig_h - ch - half_border
         else:
-            # Fit logic (pin ends)
-            if crop_idx == 0:
-                return 0.0
-            elif num_crops > 1 and crop_idx == num_crops - 1:
-                return orig_h - ch
+            # 中間のクロップは均等配置
+            if disp.scale is not None or disp.size is not None:
+                # scale/size指定時: 等間隔で配置
+                total_crop_h = num_crops * ch + (num_crops - 1) * actual_gap_cc
+                start_y = (orig_h - total_crop_h) / 2
+                return start_y + crop_idx * (ch + actual_gap_cc)
             else:
+                # fit時: スロットの中央に配置
                 single_h = (orig_h - actual_gap_cc * (num_crops - 1)) / num_crops
                 slot_top = crop_idx * (single_h + actual_gap_cc)
                 return slot_top + (single_h - ch) / 2
@@ -849,17 +1228,35 @@ def _calculate_crop_horizontal_position(
     elif region.align == "end":
         return orig_w - cw + region.offset - half_border
     else:  # auto
-        if disp.scale is not None or disp.size is not None:
-            return crop_idx * (cw + actual_gap_cc)
+        # 最初と最後のクロップは端に揃える（pin ends）
+        if crop_idx == 0:
+            return 0.0 + half_border
+        elif num_crops > 1 and crop_idx == num_crops - 1:
+            return orig_w - cw - half_border
         else:
-            if crop_idx == 0:
-                return 0.0
-            elif num_crops > 1 and crop_idx == num_crops - 1:
-                return orig_w - cw
+            # 中間のクロップは均等配置
+            if disp.scale is not None or disp.size is not None:
+                # scale/size指定時: 等間隔で配置
+                total_crop_w = num_crops * cw + (num_crops - 1) * actual_gap_cc
+                start_x = (orig_w - total_crop_w) / 2
+                return start_x + crop_idx * (cw + actual_gap_cc)
             else:
-                sw = (orig_w - actual_gap_cc * (num_crops - 1)) / num_crops
-                slot_left = crop_idx * (sw + actual_gap_cc)
-                return slot_left + (sw - cw) / 2
+                # fit時: スロットの中央に配置
+                single_w = (orig_w - actual_gap_cc * (num_crops - 1)) / num_crops
+                slot_left = crop_idx * (single_w + actual_gap_cc)
+                return slot_left + (single_w - cw) / 2
+
+
+def _get_grid_cell_image(
+    image_grid: List[List[Optional[str]]], row_idx: int, col_idx: int
+) -> Optional[str]:
+    """Safely fetch image path for a grid cell."""
+    if row_idx >= len(image_grid) or row_idx < 0:
+        return None
+    row = image_grid[row_idx]
+    if col_idx >= len(row) or col_idx < 0:
+        return None
+    return row[col_idx]
 
 
 def calculate_flow_row_heights(
@@ -868,18 +1265,20 @@ def calculate_flow_row_heights(
     image_grid: List[List[Optional[str]]],
     border_offset_cm: float,
 ) -> List[float]:
-    """Calculate maximum content height for each row in flow mode."""
+    """Calculate maximum content height for each row in flow mode.
+
+    Empty cells are excluded from the calculation so that rows shrink
+    to fit only the actual images present.
+    """
     row_heights = []
 
-    for row_idx, row_images in enumerate(image_grid):
-        if row_idx >= config.rows:
-            break
-
+    for row_idx in range(config.rows):
         row_max_h = 0.0
-        for col_idx, image_path in enumerate(row_images):
-            if col_idx >= config.cols or image_path is None:
+        for col_idx in range(config.cols):
+            image_path = _get_grid_cell_image(image_grid, row_idx, col_idx)
+            # Skip empty cells - they should not affect row height in flow mode
+            if image_path is None or image_path == "__PLACEHOLDER__":
                 continue
-
             min_x, min_y, max_x, max_y = calculate_item_bounds(
                 config, metrics, image_path, row_idx, col_idx, border_offset_cm
             )
@@ -891,9 +1290,75 @@ def calculate_flow_row_heights(
     return row_heights
 
 
+def calculate_flow_col_widths(
+    config: GridConfig,
+    metrics: LayoutMetrics,
+    image_grid: List[List[Optional[str]]],
+    border_offset_cm: float,
+) -> List[float]:
+    """Calculate maximum content width for each column in flow mode.
+
+    Empty cells are excluded from the calculation so that columns shrink
+    to fit only the actual images present.
+    """
+    col_widths = []
+
+    for col_idx in range(config.cols):
+        col_max_w = 0.0
+        for row_idx in range(config.rows):
+            image_path = _get_grid_cell_image(image_grid, row_idx, col_idx)
+            # Skip empty cells - they should not affect column width in flow mode
+            if image_path is None or image_path == "__PLACEHOLDER__":
+                continue
+            min_x, min_y, max_x, max_y = calculate_item_bounds(
+                config, metrics, image_path, row_idx, col_idx, border_offset_cm
+            )
+            item_w = max_x - min_x
+            col_max_w = max(col_max_w, item_w)
+
+        col_widths.append(col_max_w if col_max_w > 0 else metrics.main_width)
+
+    return col_widths
+
+
+def _placeholder_override_size(
+    config: GridConfig, metrics: LayoutMetrics
+) -> Tuple[float, float]:
+    """空セル(プレースホルダー)用の仮サイズ(cm)。
+
+    flow レイアウトで空セルを「セル1つ分」として幅・高さ計算に含めるために使う。
+    """
+    if (
+        config.size_mode == "fixed"
+        and config.image_width is not None
+        and config.image_height is not None
+        and config.image_width > 0
+        and config.image_height > 0
+    ):
+        return float(config.image_width), float(config.image_height)
+
+    return float(metrics.main_width), float(metrics.main_height)
+
+
 # =============================================================================
 # PPTX Generation
 # =============================================================================
+
+
+def _get_dash_style(dash: str):
+    """Convert dash style string to MSO_LINE_DASH_STYLE."""
+    if dash == "dash":
+        return MSO_LINE_DASH_STYLE.DASH
+    elif dash == "dot":
+        return MSO_LINE_DASH_STYLE.ROUND_DOT
+    elif dash == "dash_dot":
+        return MSO_LINE_DASH_STYLE.DASH_DOT
+    elif dash == "long_dash":
+        return MSO_LINE_DASH_STYLE.LONG_DASH
+    elif dash == "long_dash_dot":
+        return MSO_LINE_DASH_STYLE.LONG_DASH_DOT
+    else:
+        return MSO_LINE_DASH_STYLE.SOLID
 
 
 def add_border_shape(
@@ -905,6 +1370,7 @@ def add_border_shape(
     border_color: Tuple[int, int, int],
     border_width: float,
     shape_type: str = "rectangle",
+    dash_style: str = "solid",
 ) -> None:
     """Add a border shape to a slide."""
     ms_shape_type = (
@@ -921,6 +1387,7 @@ def add_border_shape(
     shape.fill.background()
     shape.line.color.rgb = RGBColor(*border_color)
     shape.line.width = pt_to_emu(border_width)
+    shape.line.dash_style = _get_dash_style(dash_style)
     shape.shadow.inherit = False
 
 
@@ -932,10 +1399,18 @@ def add_crop_borders_to_image(
     image_height: float,
     original_image_path: str,
     crop_regions: List[CropRegion],
-    border_width: float,
-    border_shape: str = "rectangle",
+    global_border_width: float,
+    global_border_shape: str = "rectangle",
+    global_border_dash: str = "solid",
+    global_show_border: bool = True,
 ) -> None:
-    """Add crop region borders overlaid on the main image."""
+    """Add crop region borders overlaid on the main image.
+
+    Each region can override global settings via its own attributes.
+    """
+    if not global_show_border and all(r.show_crop_border is None for r in crop_regions):
+        return
+
     try:
         orig_width_px, orig_height_px = get_image_dimensions(original_image_path)
     except Exception:
@@ -945,10 +1420,20 @@ def add_crop_borders_to_image(
     scale_y = image_height / orig_height_px
 
     for region in crop_regions:
-        border_left = image_left + region.x * scale_x
-        border_top = image_top + region.y * scale_y
-        border_w = region.width * scale_x
-        border_h = region.height * scale_y
+        # 領域ごとの設定があればそれを使用、なければグローバル設定
+        show = region.show_crop_border if region.show_crop_border is not None else global_show_border
+        if not show:
+            continue
+
+        width = region.crop_border_width if region.crop_border_width is not None else global_border_width
+        shape = region.crop_border_shape if region.crop_border_shape is not None else global_border_shape
+        dash = region.crop_border_dash if region.crop_border_dash is not None else global_border_dash
+
+        x, y, w, h = resolve_crop_box(region, orig_width_px, orig_height_px)
+        border_left = image_left + x * scale_x
+        border_top = image_top + y * scale_y
+        border_w = w * scale_x
+        border_h = h * scale_y
         add_border_shape(
             slide,
             border_left,
@@ -956,65 +1441,104 @@ def add_crop_borders_to_image(
             border_w,
             border_h,
             region.color,
-            border_width,
-            border_shape,
+            width,
+            shape,
+            dash,
         )
 
 
 def create_grid_presentation(config: GridConfig) -> str:
     """Create a PowerPoint presentation with images arranged in a grid layout."""
-    prs = Presentation()
-    prs.slide_width = cm_to_emu(config.slide_width)
-    prs.slide_height = cm_to_emu(config.slide_height)
-    blank_layout = prs.slide_layouts[6]
-    slide = prs.slides.add_slide(blank_layout)
+    normalize_slide_size(config)
 
-    # Build image grid
-    if config.arrangement == "row":
-        image_grid = [get_sorted_images(folder) for folder in config.folders]
+    # Use template if specified, otherwise create new presentation
+    if config.template_path and Path(config.template_path).exists():
+        prs = Presentation(config.template_path)
     else:
-        columns = [get_sorted_images(folder) for folder in config.folders]
-        max_len = max(len(col) for col in columns) if columns else 0
-        image_grid = [
-            [col[i] if i < len(col) else None for col in columns]
-            for i in range(max_len)
-        ]
+        prs = Presentation()
+        prs.slide_width = cm_to_emu(config.slide_width)
+        prs.slide_height = cm_to_emu(config.slide_height)
+
+    # Keep layout math aligned to the actual slide size (template or EMU-rounded)
+    config.slide_width = emu_to_cm(prs.slide_width)
+    config.slide_height = emu_to_cm(prs.slide_height)
+
+    # Get slide layout
+    layout_index = min(config.slide_layout_index, len(prs.slide_layouts) - 1)
+    slide_layout = prs.slide_layouts[layout_index]
+    slide = prs.slides.add_slide(slide_layout)
+
+    # NEW: unified grid builder (rows x cols)
+    image_grid = build_image_grid(config)
 
     temp_dir = tempfile.mkdtemp()
-    num_crops = len(config.crop_regions)
     metrics = calculate_grid_metrics(config)
 
     border_offset_cm = (
-        pt_to_cm(config.crop_border_width) if config.show_zoom_border else 0.0
+        pt_to_cm(config.zoom_border_width) if config.show_zoom_border else 0.0
     )
     half_border = border_offset_cm / 2.0 if config.show_zoom_border else 0.0
 
-    # Calculate row heights for flow mode
+    flow_mode = config.layout_mode == "flow"
+    flow_h = flow_mode and config.flow_axis in ("both", "horizontal")
+    flow_v = flow_mode and config.flow_axis in ("both", "vertical")
+
+    # Calculate row/column sizes for flow mode
     flow_row_heights = []
+    flow_col_widths = []
     total_content_height = 0.0
-    if config.layout_mode == "flow":
-        flow_row_heights = calculate_flow_row_heights(
-            config, metrics, image_grid, border_offset_cm
+    total_content_width = 0.0
+    if flow_mode:
+        flow_row_heights = (
+            calculate_flow_row_heights(config, metrics, image_grid, border_offset_cm)
+            if flow_v
+            else metrics.row_heights[:]
         )
-        for i, rh in enumerate(flow_row_heights):
-            total_content_height += rh
-            if i < len(flow_row_heights) - 1:
-                total_content_height += config.gap_v.to_cm(metrics.main_height)
+        flow_col_widths = (
+            calculate_flow_col_widths(config, metrics, image_grid, border_offset_cm)
+            if flow_h
+            else metrics.col_widths[:]
+        )
+
+        if flow_v:
+            for i, rh in enumerate(flow_row_heights):
+                total_content_height += rh
+                if i < len(flow_row_heights) - 1:
+                    total_content_height += config.gap_v.to_cm(metrics.main_height)
+
+        if flow_h:
+            total_content_width = sum(flow_col_widths)
+            if config.cols > 1:
+                total_content_width += (config.cols - 1) * config.gap_h.to_cm(
+                    metrics.main_width
+                )
 
     try:
-        # Determine start Y based on flow vertical alignment
+        # Determine start positions based on flow alignment
         current_y = config.margin_top
-        if config.layout_mode == "flow":
-            avail_h = config.slide_height - config.margin_top - config.margin_bottom
-            if config.flow_vertical_align == "center":
-                current_y = config.margin_top + (avail_h - total_content_height) / 2
-            elif config.flow_vertical_align == "bottom":
-                current_y = (config.margin_top + avail_h) - total_content_height
+        flow_start_x = config.margin_left
+        if flow_mode:
+            if flow_v:
+                avail_h = (
+                    config.slide_height - config.margin_top - config.margin_bottom
+                )
+                if config.flow_vertical_align == "center":
+                    current_y = (
+                        config.margin_top + (avail_h - total_content_height) / 2
+                    )
+                elif config.flow_vertical_align == "bottom":
+                    current_y = (config.margin_top + avail_h) - total_content_height
 
-        for row_idx, row_images in enumerate(image_grid):
-            if row_idx >= config.rows:
-                break
+            if flow_h:
+                avail_w = config.slide_width - config.margin_left - config.margin_right
+                if config.flow_align == "center":
+                    flow_start_x = (
+                        config.margin_left + (avail_w - total_content_width) / 2
+                    )
+                elif config.flow_align == "right":
+                    flow_start_x = config.margin_left + (avail_w - total_content_width)
 
+        for row_idx in range(config.rows):
             # Determine row height
             if config.layout_mode == "flow":
                 current_row_height = (
@@ -1030,43 +1554,15 @@ def create_grid_presentation(config: GridConfig) -> str:
                 )
 
             this_gap_v = config.gap_v.to_cm(metrics.main_height)
-            current_x = config.margin_left
-
-            # Pre-calculate row width for flow alignment
-            if config.layout_mode == "flow":
-                row_total_content_width = 0.0
-                valid_items = 0
-
-                for col_idx, image_path in enumerate(row_images):
-                    if col_idx >= config.cols or image_path is None:
-                        continue
-                    min_x, min_y, max_x, max_y = calculate_item_bounds(
-                        config, metrics, image_path, row_idx, col_idx, border_offset_cm
-                    )
-                    row_total_content_width += max_x - min_x
-                    valid_items += 1
-
-                if valid_items > 1:
-                    row_total_content_width += (valid_items - 1) * config.gap_h.to_cm(
-                        metrics.main_width
-                    )
-
-                avail_w = config.slide_width - config.margin_left - config.margin_right
-                if config.flow_align == "center":
-                    current_x = (
-                        config.margin_left + (avail_w - row_total_content_width) / 2
-                    )
-                elif config.flow_align == "right":
-                    current_x = config.margin_left + (avail_w - row_total_content_width)
+            current_x = flow_start_x if config.layout_mode == "flow" else config.margin_left
 
             # Process each cell
-            for col_idx, image_path in enumerate(row_images):
-                if col_idx >= config.cols:
-                    break
-
+            for col_idx in range(config.cols):
+                image_path = image_grid[row_idx][col_idx]
                 this_gap_h = config.gap_h.to_cm(metrics.main_width)
 
-                if image_path is None:
+                # Skip None or placeholder cells (ただし flow では幅だけは確保する)
+                if image_path is None or image_path == "__PLACEHOLDER__":
                     if config.layout_mode == "grid":
                         w = (
                             metrics.col_widths[col_idx]
@@ -1074,9 +1570,20 @@ def create_grid_presentation(config: GridConfig) -> str:
                             else metrics.main_width
                         )
                         current_x += w + this_gap_h
+                    else:  # flow
+                        w = (
+                            flow_col_widths[col_idx]
+                            if col_idx < len(flow_col_widths)
+                            else metrics.main_width
+                        )
+                        current_x += w + this_gap_h
                     continue
 
-                has_crops = should_apply_crop(row_idx, col_idx, config)
+                crop_regions = get_crop_regions_for_cell(row_idx, col_idx, config)
+                has_crops = bool(crop_regions) and should_apply_crop(
+                    row_idx, col_idx, config
+                )
+
                 orig_w, orig_h = calculate_image_size_fit(
                     image_path, metrics.main_width, metrics.main_height, config.fit_mode
                 )
@@ -1100,20 +1607,24 @@ def create_grid_presentation(config: GridConfig) -> str:
                 item_w = max_x - min_x
                 item_h = max_y - min_y
 
-                if config.layout_mode == "flow":
-                    item_draw_left = current_x
-                    item_draw_top = current_y + (current_row_height - item_h) / 2
-                else:
+                if flow_mode and flow_h:
                     cell_w = (
-                        metrics.col_widths[col_idx]
-                        if col_idx < len(metrics.col_widths)
+                        flow_col_widths[col_idx]
+                        if col_idx < len(flow_col_widths)
                         else metrics.main_width
                     )
                     item_draw_left = current_x + (cell_w - item_w) / 2
-                    item_draw_top = current_y + (current_row_height - item_h) / 2
+                    final_main_left = item_draw_left - min_x
+                else:
+                    # Non-flow horizontal axis keeps grid-aligned main images.
+                    final_main_left = current_x + (metrics.main_width - orig_w) / 2
 
-                final_main_left = item_draw_left - min_x
-                final_main_top = item_draw_top - min_y
+                if flow_mode and flow_v:
+                    item_draw_top = current_y + (current_row_height - item_h) / 2
+                    final_main_top = item_draw_top - min_y
+                else:
+                    # Non-flow vertical axis keeps grid-aligned main images.
+                    final_main_top = current_y + (metrics.main_height - orig_h) / 2
 
                 # Add main image
                 pic = slide.shapes.add_picture(
@@ -1125,7 +1636,7 @@ def create_grid_presentation(config: GridConfig) -> str:
                 )
                 pic.shadow.inherit = False
 
-                if has_crops and config.show_crop_border:
+                if has_crops:
                     add_crop_borders_to_image(
                         slide,
                         final_main_left,
@@ -1133,13 +1644,14 @@ def create_grid_presentation(config: GridConfig) -> str:
                         orig_w,
                         orig_h,
                         image_path,
-                        config.crop_regions,
+                        crop_regions,
                         config.crop_border_width,
                         config.crop_border_shape,
+                        config.crop_border_dash,
+                        config.show_crop_border,
                     )
 
-                # Add cropped images
-                if has_crops and num_crops > 0:
+                if has_crops and len(crop_regions) > 0:
                     _add_crop_images(
                         slide,
                         config,
@@ -1148,6 +1660,7 @@ def create_grid_presentation(config: GridConfig) -> str:
                         temp_dir,
                         row_idx,
                         col_idx,
+                        crop_regions,
                         final_main_left,
                         final_main_top,
                         orig_w,
@@ -1158,9 +1671,38 @@ def create_grid_presentation(config: GridConfig) -> str:
                         half_border,
                     )
 
+                # Add text label if enabled
+                if config.label_config.enabled:
+                    label_text = generate_label_text(
+                        config, image_path, row_idx, col_idx
+                    )
+                    if label_text:
+                        label_h = calculate_label_height(config.label_config)
+                        label_gap = config.label_config.gap
+
+                        if config.label_config.position == "top":
+                            label_top = final_main_top - label_gap - label_h
+                        else:  # bottom
+                            label_top = final_main_top + orig_h + label_gap
+
+                        add_text_label(
+                            slide,
+                            label_text,
+                            final_main_left,
+                            label_top,
+                            orig_w,
+                            label_h,
+                            config.label_config,
+                        )
+
                 # Advance X position
-                if config.layout_mode == "flow":
-                    current_x += item_w + this_gap_h
+                if flow_mode:
+                    w = (
+                        flow_col_widths[col_idx]
+                        if col_idx < len(flow_col_widths)
+                        else metrics.main_width
+                    )
+                    current_x += w + this_gap_h
                 else:
                     w = (
                         metrics.col_widths[col_idx]
@@ -1186,6 +1728,7 @@ def _add_crop_images(
     temp_dir: str,
     row_idx: int,
     col_idx: int,
+    crop_regions: List[CropRegion],
     final_main_left: float,
     final_main_top: float,
     orig_w: float,
@@ -1197,9 +1740,14 @@ def _add_crop_images(
 ) -> None:
     """Add cropped images next to the main image."""
     disp = config.crop_display
-    num_crops = len(config.crop_regions)
+    # 空クロップ（show_zoomed=False）はautoの位置計算から除外
+    num_crops = sum(1 for r in crop_regions if r.show_zoomed)
+    visible_crop_idx = 0
 
-    for crop_idx, region in enumerate(config.crop_regions):
+    for crop_idx, region in enumerate(crop_regions):
+        # 空クロップの場合、拡大画像は描画しない
+        if not region.show_zoomed:
+            continue
         crop_filename = f"crop_{row_idx}_{col_idx}_{crop_idx}.png"
         crop_path = os.path.join(temp_dir, crop_filename)
         try:
@@ -1217,12 +1765,12 @@ def _add_crop_images(
         if region.gap is not None and config.show_zoom_border:
             this_gap_mc += border_offset_cm
 
-        # Calculate position
+        # Calculate position (use visible_crop_idx for auto positioning)
         if disp.position == "right":
             c_left = final_main_left + orig_w + this_gap_mc
             c_top = _calculate_crop_absolute_vertical_position(
                 region,
-                crop_idx,
+                visible_crop_idx,
                 num_crops,
                 final_main_top,
                 orig_h,
@@ -1235,7 +1783,7 @@ def _add_crop_images(
             c_top = final_main_top + orig_h + this_gap_mc
             c_left = _calculate_crop_absolute_horizontal_position(
                 region,
-                crop_idx,
+                visible_crop_idx,
                 num_crops,
                 final_main_left,
                 orig_w,
@@ -1254,7 +1802,12 @@ def _add_crop_images(
         )
         pic_crop.shadow.inherit = False
 
-        if config.show_zoom_border:
+        # 領域ごとの枠線設定があればそれを使用、なければグローバル設定
+        show_zb = region.show_zoom_border if region.show_zoom_border is not None else config.show_zoom_border
+        if show_zb:
+            zb_width = region.zoom_border_width if region.zoom_border_width is not None else config.zoom_border_width
+            zb_shape = region.zoom_border_shape if region.zoom_border_shape is not None else config.zoom_border_shape
+            zb_dash = region.zoom_border_dash if region.zoom_border_dash is not None else config.zoom_border_dash
             add_border_shape(
                 slide,
                 c_left,
@@ -1262,9 +1815,53 @@ def _add_crop_images(
                 cw,
                 ch,
                 region.color,
-                config.zoom_border_width,
-                config.zoom_border_shape,
+                zb_width,
+                zb_shape,
+                zb_dash,
             )
+
+        # Draw connector line if enabled
+        if config.connector.show:
+            # Calculate crop border position on main image
+            try:
+                orig_width_px, orig_height_px = get_image_dimensions(image_path)
+                x, y, w, h = resolve_crop_box(region, orig_width_px, orig_height_px)
+
+                scale_x = orig_w / orig_width_px
+                scale_y = orig_h / orig_height_px
+
+                border_left = final_main_left + x * scale_x
+                border_top = final_main_top + y * scale_y
+                border_w = w * scale_x
+                border_h = h * scale_y
+
+                # Calculate connector points
+                (start_x, start_y), (end_x, end_y) = calculate_connector_points(
+                    border_left,
+                    border_top,
+                    border_w,
+                    border_h,
+                    c_left,
+                    c_top,
+                    cw,
+                    ch,
+                    disp.position,
+                )
+
+                # Draw connector line
+                add_connector_line(
+                    slide,
+                    start_x,
+                    start_y,
+                    end_x,
+                    end_y,
+                    config.connector,
+                    region.color,
+                )
+            except Exception:
+                pass  # Skip connector if there's an error
+
+        visible_crop_idx += 1
 
 
 def _resolve_crop_size(
@@ -1324,14 +1921,20 @@ def _calculate_crop_absolute_vertical_position(
     elif region.align == "end":
         return final_main_top + orig_h - ch + region.offset - half_border
     else:  # auto
-        if disp.scale is not None or disp.size is not None:
-            return final_main_top + crop_idx * (ch + global_gap_cc)
+        # 最初と最後のクロップは端に揃える（pin ends）
+        if crop_idx == 0:
+            return final_main_top + half_border
+        elif num_crops > 1 and crop_idx == num_crops - 1:
+            return (final_main_top + orig_h) - ch - half_border
         else:
-            if crop_idx == 0:
-                return final_main_top
-            elif num_crops > 1 and crop_idx == num_crops - 1:
-                return (final_main_top + orig_h) - ch
+            # 中間のクロップは均等配置
+            if disp.scale is not None or disp.size is not None:
+                # scale/size指定時: 等間隔で配置
+                total_crop_h = num_crops * ch + (num_crops - 1) * global_gap_cc
+                start_y = final_main_top + (orig_h - total_crop_h) / 2
+                return start_y + crop_idx * (ch + global_gap_cc)
             else:
+                # fit時: スロットの中央に配置
                 single_h = (orig_h - global_gap_cc * (num_crops - 1)) / num_crops
                 slot_top = final_main_top + crop_idx * (single_h + global_gap_cc)
                 return slot_top + (single_h - ch) / 2
@@ -1356,17 +1959,170 @@ def _calculate_crop_absolute_horizontal_position(
     elif region.align == "end":
         return final_main_left + orig_w - cw + region.offset - half_border
     else:  # auto
-        if disp.scale is not None or disp.size is not None:
-            return final_main_left + crop_idx * (cw + global_gap_cc)
+        # 最初と最後のクロップは端に揃える（pin ends）
+        if crop_idx == 0:
+            return final_main_left + half_border
+        elif num_crops > 1 and crop_idx == num_crops - 1:
+            return (final_main_left + orig_w) - cw - half_border
         else:
-            if crop_idx == 0:
-                return final_main_left
-            elif num_crops > 1 and crop_idx == num_crops - 1:
-                return (final_main_left + orig_w) - cw
+            # 中間のクロップは均等配置
+            if disp.scale is not None or disp.size is not None:
+                # scale/size指定時: 等間隔で配置
+                total_crop_w = num_crops * cw + (num_crops - 1) * global_gap_cc
+                start_x = final_main_left + (orig_w - total_crop_w) / 2
+                return start_x + crop_idx * (cw + global_gap_cc)
             else:
+                # fit時: スロットの中央に配置
                 single_w = (orig_w - global_gap_cc * (num_crops - 1)) / num_crops
                 slot_left = final_main_left + crop_idx * (single_w + global_gap_cc)
                 return slot_left + (single_w - cw) / 2
+
+
+# =============================================================================
+# Text Label Functions
+# =============================================================================
+
+
+def generate_label_text(
+    config: GridConfig,
+    image_path: Optional[str],
+    row_idx: int,
+    col_idx: int,
+) -> str:
+    """Generate label text based on label mode."""
+    label_config = config.label_config
+
+    if label_config.mode == "filename":
+        if image_path:
+            return Path(image_path).stem
+        return ""
+    elif label_config.mode == "number":
+        # Calculate sequential number (row-major order)
+        n = row_idx * config.cols + col_idx + 1
+        return label_config.number_format.format(n=n)
+    elif label_config.mode == "custom":
+        idx = row_idx * config.cols + col_idx
+        if idx < len(label_config.custom_texts):
+            return label_config.custom_texts[idx]
+        return ""
+    return ""
+
+
+def add_text_label(
+    slide,
+    text: str,
+    left: float,
+    top: float,
+    width: float,
+    height: float,
+    label_config: LabelConfig,
+) -> None:
+    """Add a text label to the slide."""
+    if not text:
+        return
+
+    # Create text box
+    textbox = slide.shapes.add_textbox(
+        cm_to_emu(left),
+        cm_to_emu(top),
+        cm_to_emu(width),
+        cm_to_emu(height),
+    )
+
+    # Configure text frame
+    tf = textbox.text_frame
+    tf.word_wrap = False
+
+    # Add text
+    p = tf.paragraphs[0]
+    p.text = text
+    p.alignment = PP_ALIGN.CENTER
+
+    # Configure font
+    run = p.runs[0]
+    run.font.name = label_config.font_name
+    run.font.size = Pt(label_config.font_size)
+    run.font.bold = label_config.font_bold
+    run.font.color.rgb = RGBColor(*label_config.font_color)
+
+
+def calculate_label_height(label_config: LabelConfig) -> float:
+    """Calculate label height in cm based on font size."""
+    # Approximate: font size (pt) * 1.2 / 72 inches * 2.54 cm
+    return label_config.font_size * 1.5 / 72 * 2.54
+
+
+# =============================================================================
+# Connector Line Functions
+# =============================================================================
+
+
+def add_connector_line(
+    slide,
+    start_x: float,
+    start_y: float,
+    end_x: float,
+    end_y: float,
+    connector_config: ConnectorConfig,
+    region_color: Tuple[int, int, int],
+) -> None:
+    """Add a connector line between crop border and zoomed image."""
+    # Use region color if no specific color is set
+    line_color = connector_config.color if connector_config.color else region_color
+
+    # Create a straight connector using add_connector
+    connector = slide.shapes.add_connector(
+        MSO_CONNECTOR.STRAIGHT,
+        cm_to_emu(start_x),
+        cm_to_emu(start_y),
+        cm_to_emu(end_x),
+        cm_to_emu(end_y),
+    )
+
+    # Style the line
+    connector.line.color.rgb = RGBColor(*line_color)
+    connector.line.width = pt_to_emu(connector_config.width)
+
+    # Set dash style
+    if connector_config.dash_style == "dash":
+        connector.line.dash_style = MSO_LINE_DASH_STYLE.DASH
+    elif connector_config.dash_style == "dot":
+        connector.line.dash_style = MSO_LINE_DASH_STYLE.ROUND_DOT
+    else:  # solid
+        connector.line.dash_style = MSO_LINE_DASH_STYLE.SOLID
+
+
+def calculate_connector_points(
+    crop_border_left: float,
+    crop_border_top: float,
+    crop_border_width: float,
+    crop_border_height: float,
+    zoom_left: float,
+    zoom_top: float,
+    zoom_width: float,
+    zoom_height: float,
+    position: str,
+) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+    """
+    Calculate start and end points for connector line.
+
+    Returns:
+        Tuple of (start_point, end_point) where each point is (x, y)
+    """
+    if position == "right":
+        # Connect from right edge of crop border to left edge of zoom image
+        start_x = crop_border_left + crop_border_width
+        start_y = crop_border_top + crop_border_height / 2
+        end_x = zoom_left
+        end_y = zoom_top + zoom_height / 2
+    else:  # bottom
+        # Connect from bottom edge of crop border to top edge of zoom image
+        start_x = crop_border_left + crop_border_width / 2
+        start_y = crop_border_top + crop_border_height
+        end_x = zoom_left + zoom_width / 2
+        end_y = zoom_top
+
+    return (start_x, start_y), (end_x, end_y)
 
 
 # =============================================================================
@@ -1389,6 +2145,7 @@ grid:
   layout_mode: flow # 'grid' (aligned) or 'flow' (compact)
   flow_align: left # 'left', 'center', 'right' (only for flow)
   flow_vertical_align: center # 'top', 'center', 'bottom' (only for flow)
+  flow_axis: both # 'both', 'horizontal', 'vertical' (only for flow)
 
 # Margins around the grid (cm)
 margin:
@@ -1472,3 +2229,399 @@ def generate_sample_config(output_path: str) -> None:
     """Generate a sample configuration file."""
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(SAMPLE_CONFIG)
+
+
+# =============================================================================
+# Crop Presets
+# =============================================================================
+
+PRESETS_FILE = "crop_presets.yaml"
+
+
+def get_default_presets() -> List[CropPreset]:
+    """ビルトインプリセットを返す（ズーム用プリセット）"""
+    return [
+        CropPreset(
+            name="左右ズーム",
+            description="左右の2箇所を拡大表示",
+            display_position="bottom",
+            regions=[
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.05,
+                    y_ratio=0.25,
+                    width_ratio=0.25,
+                    height_ratio=0.5,
+                    color=(255, 0, 0),
+                    name="左",
+                ),
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.70,
+                    y_ratio=0.25,
+                    width_ratio=0.25,
+                    height_ratio=0.5,
+                    color=(0, 0, 255),
+                    name="右",
+                ),
+            ],
+        ),
+        CropPreset(
+            name="正方形2箇所ズーム（横）",
+            description="左右に正方形2箇所を拡大表示",
+            display_position="bottom",
+            regions=[
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.05,
+                    y_ratio=0.25,
+                    width_ratio=0.25,
+                    height_ratio=0.25,
+                    color=(255, 0, 0),
+                    name="左",
+                ),
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.70,
+                    y_ratio=0.25,
+                    width_ratio=0.25,
+                    height_ratio=0.25,
+                    color=(0, 0, 255),
+                    name="右",
+                ),
+            ],
+        ),
+        CropPreset(
+            name="正方形2箇所ズーム（縦）",
+            description="上下に正方形2箇所を拡大表示",
+            display_position="right",
+            regions=[
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.3,
+                    y_ratio=0.05,
+                    width_ratio=0.25,
+                    height_ratio=0.25,
+                    color=(255, 0, 0),
+                    name="上",
+                ),
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.3,
+                    y_ratio=0.70,
+                    width_ratio=0.25,
+                    height_ratio=0.25,
+                    color=(0, 0, 255),
+                    name="下",
+                ),
+            ],
+        ),
+        CropPreset(
+            name="上下ズーム",
+            description="上下の2箇所を拡大表示",
+            display_position="right",
+            regions=[
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.25,
+                    y_ratio=0.05,
+                    width_ratio=0.5,
+                    height_ratio=0.25,
+                    color=(255, 0, 0),
+                    name="上",
+                ),
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.25,
+                    y_ratio=0.70,
+                    width_ratio=0.5,
+                    height_ratio=0.25,
+                    color=(0, 0, 255),
+                    name="下",
+                ),
+            ],
+        ),
+        CropPreset(
+            name="4隅ズーム",
+            description="4隅を拡大表示",
+            display_position="bottom",
+            regions=[
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.0,
+                    y_ratio=0.0,
+                    width_ratio=0.2,
+                    height_ratio=0.2,
+                    color=(255, 0, 0),
+                    name="左上",
+                ),
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.8,
+                    y_ratio=0.0,
+                    width_ratio=0.2,
+                    height_ratio=0.2,
+                    color=(0, 255, 0),
+                    name="右上",
+                ),
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.0,
+                    y_ratio=0.8,
+                    width_ratio=0.2,
+                    height_ratio=0.2,
+                    color=(0, 0, 255),
+                    name="左下",
+                ),
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.8,
+                    y_ratio=0.8,
+                    width_ratio=0.2,
+                    height_ratio=0.2,
+                    color=(255, 255, 0),
+                    name="右下",
+                ),
+            ],
+        ),
+        CropPreset(
+            name="中央ズーム",
+            description="中央部分を拡大表示",
+            display_position="right",
+            regions=[
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.35,
+                    y_ratio=0.35,
+                    width_ratio=0.3,
+                    height_ratio=0.3,
+                    color=(255, 0, 0),
+                    name="中央",
+                ),
+            ],
+        ),
+        CropPreset(
+            name="中央＋4隅ズーム",
+            description="中央と4隅を拡大表示",
+            display_position="bottom",
+            regions=[
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.0,
+                    y_ratio=0.0,
+                    width_ratio=0.15,
+                    height_ratio=0.15,
+                    color=(255, 0, 0),
+                    name="左上",
+                ),
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.425,
+                    y_ratio=0.425,
+                    width_ratio=0.15,
+                    height_ratio=0.15,
+                    color=(0, 255, 0),
+                    name="中央",
+                ),
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.85,
+                    y_ratio=0.85,
+                    width_ratio=0.15,
+                    height_ratio=0.15,
+                    color=(0, 0, 255),
+                    name="右下",
+                ),
+            ],
+        ),
+        CropPreset(
+            name="横3箇所ズーム",
+            description="横に3箇所を拡大表示",
+            display_position="bottom",
+            regions=[
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.05,
+                    y_ratio=0.3,
+                    width_ratio=0.2,
+                    height_ratio=0.4,
+                    color=(255, 0, 0),
+                    name="左",
+                ),
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.4,
+                    y_ratio=0.3,
+                    width_ratio=0.2,
+                    height_ratio=0.4,
+                    color=(0, 255, 0),
+                    name="中",
+                ),
+                CropRegion(
+                    x=0,
+                    y=0,
+                    width=100,
+                    height=100,
+                    mode="ratio",
+                    x_ratio=0.75,
+                    y_ratio=0.3,
+                    width_ratio=0.2,
+                    height_ratio=0.4,
+                    color=(0, 0, 255),
+                    name="右",
+                ),
+            ],
+        ),
+    ]
+
+
+def load_crop_presets(filepath: Optional[str] = None) -> List[CropPreset]:
+    """プリセットをファイルから読み込む（デフォルトプリセット + ユーザー定義）"""
+    presets = get_default_presets()
+
+    if filepath is None:
+        filepath = PRESETS_FILE
+
+    if Path(filepath).exists():
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            if data and "presets" in data:
+                for p in data["presets"]:
+                    regions = []
+                    for i, r in enumerate(p.get("regions", [])):
+                        regions.append(_parse_crop_region_dict(r, f"preset_{i}"))
+                    presets.append(
+                        CropPreset(
+                            name=p.get("name", "Unknown"),
+                            regions=regions,
+                            description=p.get("description", ""),
+                            display_position=p.get("display_position", "right"),
+                        )
+                    )
+        except Exception:
+            pass  # ファイル読み込みエラーは無視
+
+    return presets
+
+
+def save_crop_preset(preset: CropPreset, filepath: Optional[str] = None) -> None:
+    """プリセットをファイルに保存"""
+    if filepath is None:
+        filepath = PRESETS_FILE
+
+    # 既存のプリセットを読み込む
+    presets_data: List[dict] = []
+    if Path(filepath).exists():
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+            presets_data = data.get("presets", [])
+        except Exception:
+            pass
+
+    # 同名のプリセットがあれば上書き
+    presets_data = [p for p in presets_data if p.get("name") != preset.name]
+
+    # 新しいプリセットを追加
+    presets_data.append(
+        {
+            "name": preset.name,
+            "description": preset.description,
+            "display_position": preset.display_position,
+            "regions": [
+                {
+                    "name": r.name,
+                    "x": r.x,
+                    "y": r.y,
+                    "width": r.width,
+                    "height": r.height,
+                    "color": list(r.color),
+                    "align": r.align,
+                    "offset": r.offset,
+                    "gap": r.gap,
+                    "mode": r.mode,
+                    "x_ratio": r.x_ratio,
+                    "y_ratio": r.y_ratio,
+                    "width_ratio": r.width_ratio,
+                    "height_ratio": r.height_ratio,
+                }
+                for r in preset.regions
+            ],
+        }
+    )
+
+    with open(filepath, "w", encoding="utf-8") as f:
+        yaml.dump({"presets": presets_data}, f, allow_unicode=True)
