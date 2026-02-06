@@ -46,6 +46,7 @@ from core import (
     calculate_size_fit_static,
     normalize_slide_size,
     should_apply_crop,
+    resolve_crop_box,
     pt_to_cm,
     load_crop_presets,
     save_crop_preset,
@@ -1952,7 +1953,13 @@ class ImageGridApp:
                 filetypes=[("Images", "*.png;*.jpg;*.jpeg;*.bmp;*.webp")]
             )
         if p:
-            CropEditor(self.root, p, self._add_region_from_editor, self.crop_regions)
+            config = self._get_current_config()
+            regions = (
+                self.crop_regions
+                if should_apply_crop(row, col, config)
+                else []
+            )
+            CropEditor(self.root, p, self._add_region_from_editor, regions)
 
     def _add_region_from_editor(self, x: int, y: int, w: int, h: int, name: str):
         """CropEditorからのコールバック - 新しいクロップ領域を追加"""
@@ -2302,7 +2309,8 @@ class ImageGridApp:
             return
         disp = config.crop_display
         # 空クロップ（show_zoomed=False）はautoの位置計算から除外
-        num_crops = sum(1 for r in config.crop_regions if r.show_zoomed)
+        visible_regions = [r for r in config.crop_regions if r.show_zoomed]
+        num_crops = len(visible_regions)
 
         # If we have a real image for this cell, use its pixel size to convert px-mode regions -> ratio.
         img_w_px = None
@@ -2401,56 +2409,49 @@ class ImageGridApp:
             actual_gap_mc += border_offset_cm
             actual_gap_cc += border_offset_cm
 
-        visible_crop_idx = 0
-        for crop_idx, region in enumerate(config.crop_regions):
-            # 空クロップの場合、拡大表示はスキップ
-            if not region.show_zoomed:
-                continue
-
-            # Get crop region aspect ratio
-            if region.mode == "ratio":
-                crop_rw = region.width_ratio or 0.1
-                crop_rh = region.height_ratio or 0.1
+        for visible_crop_idx, region in enumerate(visible_regions):
+            # Resolve crop dimensions in px to match core.py sizing behavior.
+            if img_w_px and img_h_px and img_w_px > 0 and img_h_px > 0:
+                _, _, crop_w_px, crop_h_px = resolve_crop_box(region, img_w_px, img_h_px)
             else:
-                crop_rw = region.width / 1000.0 if region.width > 0 else 0.1
-                crop_rh = region.height / 1000.0 if region.height > 0 else 0.1
-            # クロップ領域の実際のピクセル比率（画像のアスペクト比を考慮）
-            crop_aspect = (
-                (crop_rw * img_w_cm) / (crop_rh * img_h_cm) if crop_rh > 0 else 1.0
-            )
+                if region.mode == "ratio":
+                    crop_w_px = int(round((region.width_ratio or 0.0) * 1000))
+                    crop_h_px = int(round((region.height_ratio or 0.0) * 1000))
+                else:
+                    crop_w_px = int(max(0, region.width))
+                    crop_h_px = int(max(0, region.height))
+            if crop_w_px <= 0 or crop_h_px <= 0:
+                crop_w_px, crop_h_px = 100, 100
 
             # Calculate crop size (maintaining aspect ratio)
-            if disp.scale is not None or disp.size is not None:
-                if disp.size:
-                    # サイズ指定時はアスペクト比を維持
-                    if crop_aspect >= 1.0:
-                        c_w = disp.size
-                        c_h = disp.size / crop_aspect
-                    else:
-                        c_h = disp.size
-                        c_w = disp.size * crop_aspect
-                else:
-                    base = (
-                        img_w_cm * disp.scale
-                        if disp.position == "right"
-                        else img_h_cm * disp.scale
+            if disp.size is not None:
+                if disp.position == "right":
+                    c_w, c_h = calculate_size_fit_static(
+                        crop_w_px, crop_h_px, disp.size, 9999, "width"
                     )
-                    if crop_aspect >= 1.0:
-                        c_w = base
-                        c_h = base / crop_aspect
-                    else:
-                        c_h = base
-                        c_w = base * crop_aspect
+                else:
+                    c_w, c_h = calculate_size_fit_static(
+                        crop_w_px, crop_h_px, 9999, disp.size, "height"
+                    )
+            elif disp.scale is not None:
+                if disp.position == "right":
+                    c_w, c_h = calculate_size_fit_static(
+                        crop_w_px, crop_h_px, img_w_cm * disp.scale, 9999, "width"
+                    )
+                else:
+                    c_w, c_h = calculate_size_fit_static(
+                        crop_w_px, crop_h_px, 9999, img_h_cm * disp.scale, "height"
+                    )
             else:
                 if disp.position == "right":
                     single_h = (img_h_cm - actual_gap_cc * (num_crops - 1)) / num_crops
                     c_w, c_h = calculate_size_fit_static(
-                        int(crop_aspect * 100), 100, metrics.crop_size, single_h, "fit"
+                        crop_w_px, crop_h_px, metrics.crop_size, single_h, "fit"
                     )
                 else:
                     single_w = (img_w_cm - actual_gap_cc * (num_crops - 1)) / num_crops
                     c_w, c_h = calculate_size_fit_static(
-                        int(crop_aspect * 100), 100, single_w, metrics.crop_size, "fit"
+                        crop_w_px, crop_h_px, single_w, metrics.crop_size, "fit"
                     )
 
             # Calculate position
@@ -2470,9 +2471,9 @@ class ImageGridApp:
                 else:  # auto
                     # 最初と最後のクロップは端に揃える（pin ends）
                     if visible_crop_idx == 0:
-                        c_t = main_t
+                        c_t = main_t + half_border
                     elif num_crops > 1 and visible_crop_idx == num_crops - 1:
-                        c_t = (main_t + img_h_cm) - c_h
+                        c_t = (main_t + img_h_cm) - c_h - half_border
                     else:
                         # 中間のクロップは均等配置
                         if disp.scale is not None or disp.size is not None:
@@ -2501,9 +2502,9 @@ class ImageGridApp:
                 else:  # auto
                     # 最初と最後のクロップは端に揃える（pin ends）
                     if visible_crop_idx == 0:
-                        c_l = main_l
+                        c_l = main_l + half_border
                     elif num_crops > 1 and visible_crop_idx == num_crops - 1:
-                        c_l = (main_l + img_w_cm) - c_w
+                        c_l = (main_l + img_w_cm) - c_w - half_border
                     else:
                         # 中間のクロップは均等配置
                         if disp.scale is not None or disp.size is not None:
@@ -2558,8 +2559,6 @@ class ImageGridApp:
                     fill=color,
                     font=("Arial", 8, "bold"),
                 )
-
-            visible_crop_idx += 1
 
     # -------------------------------------------------------------------------
     # Preset Methods
