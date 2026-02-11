@@ -937,9 +937,9 @@ def calculate_grid_metrics(config: GridConfig) -> LayoutMetrics:
 
     is_fixed_size = (
         config.size_mode == "fixed"
-        and config.image_width
+        and config.image_width is not None
         and config.image_width > 0
-        and config.image_height
+        and config.image_height is not None
         and config.image_height > 0
     )
 

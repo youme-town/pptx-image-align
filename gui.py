@@ -1726,9 +1726,9 @@ class ImageGridApp:
 
         self.image_size_mode.set(c.size_mode)
         self.image_fit_mode.set(c.fit_mode)
-        if c.image_width:
+        if c.image_width is not None:
             self.image_w.set(c.image_width)
-        if c.image_height:
+        if c.image_height is not None:
             self.image_h.set(c.image_height)
 
         # Inputs
@@ -1761,10 +1761,10 @@ class ImageGridApp:
         self.gap_cb_val.set(c.crop_display.crop_bottom_gap.value)
         self.gap_cb_mode.set(c.crop_display.crop_bottom_gap.mode)
 
-        if c.crop_display.size:
+        if c.crop_display.size is not None:
             self.crop_size_mode.set("size")
             self.crop_size_val.set(c.crop_display.size)
-        elif c.crop_display.scale:
+        elif c.crop_display.scale is not None:
             self.crop_size_mode.set("scale")
             self.crop_scale_val.set(c.crop_display.scale)
 
